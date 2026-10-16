@@ -1,0 +1,1734 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no,viewport-fit=cover">
+<title>Rescue Run</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%; background: #1b1c22; overflow: hidden;
+    touch-action: none; -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent;
+  }
+  #app { height: 100%; display: flex; flex-direction: column; align-items: center; }
+  @supports (height: 100dvh) { #app { height: 100dvh; } }
+  /* the board takes whatever room the controls leave; script sizes #wrap to fit it */
+  #boardWrap { flex: 1; min-height: 0; width: 100%; display: flex; align-items: center; justify-content: center; }
+  #wrap { position: relative; aspect-ratio: 448 / 576; width: 100%; }
+  canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+  #btns { position: absolute; top: 1.2%; right: 2%; display: flex; gap: 6px; }
+  #btns button {
+    width: clamp(26px, 6vmin, 38px); height: clamp(26px, 6vmin, 38px);
+    border: 0; border-radius: 8px; background: rgba(0,0,0,.55); color: #fff;
+    font-size: clamp(13px, 3vmin, 19px); line-height: 1; cursor: pointer; padding: 0;
+  }
+  #btns button:hover { background: rgba(0,0,0,.75); }
+
+  /* on-screen controls: only on touch devices (body.touch) */
+  #ctrl { display: none; }
+  body.touch #ctrl {
+    display: flex; width: 100%; max-width: 560px; align-items: center; justify-content: space-around;
+    padding: 6px 10px calc(10px + env(safe-area-inset-bottom));
+  }
+  body.touch { --b: clamp(44px, min(10.5dvh, 19vw), 68px); }
+  #dpad { display: grid; grid-template-columns: repeat(3, var(--b)); grid-template-rows: repeat(3, var(--b)); gap: 3px; }
+  .d {
+    background: linear-gradient(#5d6070, #42454f); border: 3px solid #0d0e12; border-bottom: 7px solid #2a2c34;
+    border-radius: 14px; display: flex; align-items: center; justify-content: center; padding: 0;
+    touch-action: none; cursor: pointer;
+  }
+  .d:active { transform: translateY(3px); filter: brightness(1.25); }
+  .d svg { width: 42%; height: 42%; fill: #e9ecf5; pointer-events: none; }
+  #up { grid-area: 1 / 2; } #left { grid-area: 2 / 1; } #right { grid-area: 2 / 3; } #down { grid-area: 3 / 2; }
+  #side { display: flex; align-items: center; justify-content: center; }
+  body.touch #side #btns { position: static; flex-direction: column; gap: 9px; }
+  body.touch #side #btns button {
+    width: calc(var(--b) * 0.78); height: calc(var(--b) * 0.78); font-size: calc(var(--b) * 0.36);
+    background: linear-gradient(#5d6070, #42454f); border: 3px solid #0d0e12; border-bottom: 6px solid #2a2c34; border-radius: 14px;
+  }
+  /* phone held sideways: D-pad on the left, buttons on the right, board in the middle */
+  @media (orientation: landscape) and (max-height: 560px) {
+    body.touch #app { flex-direction: row; align-items: stretch; }
+    body.touch #boardWrap { width: auto; min-width: 0; }
+    body.touch #ctrl { display: contents; }
+    body.touch { --b: clamp(40px, 21dvh, 64px); }
+    body.touch #dpad { order: -1; margin: 0 14px; align-self: center; }
+    body.touch #side { order: 1; margin: 0 14px; align-self: center; }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="boardWrap">
+    <div id="wrap">
+      <canvas id="c"></canvas>
+      <div id="btns">
+        <button id="bMode" title="Calm / Normal pace (C)" aria-label="Toggle calm mode">&#128034;</button>
+        <button id="bPause" title="Pause (P)" aria-label="Pause">&#9208;</button>
+        <button id="bSnd" title="Sound (M)" aria-label="Toggle sound">&#128266;</button>
+      </div>
+    </div>
+  </div>
+  <div id="ctrl">
+    <div id="dpad">
+      <button class="d" id="up" data-dir="up" aria-label="Up"><svg viewBox="0 0 24 24"><path d="M12 5l9 14H3z"/></svg></button>
+      <button class="d" id="left" data-dir="left" aria-label="Left"><svg viewBox="0 0 24 24"><path d="M5 12l14-9v18z"/></svg></button>
+      <button class="d" id="right" data-dir="right" aria-label="Right"><svg viewBox="0 0 24 24"><path d="M19 12L5 3v18z"/></svg></button>
+      <button class="d" id="down" data-dir="down" aria-label="Down"><svg viewBox="0 0 24 24"><path d="M12 19L3 5h18z"/></svg></button>
+    </div>
+    <div id="side"></div>
+  </div>
+</div>
+
+<script>
+'use strict';
+
+// Rescue Run. Six stages, three endings:
+//   1 ground floor: reach the stairs (aliens patrol around them)
+//   2 underground 1: find the key, take the stairs down
+//   3 underground 2: open the cage with the key and wake him, take the stairs up
+//   4 underground 1 again, 5 ground floor again (more dogs and robots) and out through the exit.
+//   In stage 5, touching the memory items (picture, music note, pencil, guitar) makes him fall behind:
+//     all four -> bad end;  none -> escape onto the grass (success end);
+//     some     -> stage 6, the bedroom hall: wake two more, then escape together (true end).
+
+// ---------------------------------------------------------------- constants
+const T = 16, COLS = 28, ROWS = 31, TOP = 3 * T, W = COLS * T, H = 36 * T;
+
+// '#' wall, '.' dot (speed), 'o' flower, ' ' empty path, '-' kennel gate.
+// A = ground floor, B / C = underground floors 1 and 2, D = bedroom hall (all share the kennel in the middle)
+const MAPS = { "A": [ "############################", "#............##............#", "#.####.#####.##.#####.####.#", "#o####.#####.##.#####.####o#", "#.####.#####.##.#####.####.#", "#..........................#", "#.####.##.########.##.####.#", "#.####.##.########.##.####.#", "#......##....##....##......#", "######.##### ## #####.######", "######.##### ## #####.######", "######.##          ##.######", "######.## ###--### ##.######", "######.## #      # ##.######", "      .   #      #   .      ", "######.## #      # ##.######", "######.## ######## ##.######", "######.##          ##.######", "######.## ######## ##.######", "######.## ######## ##.######", "#............##............#", "#.####.#####.##.#####.####.#", "#.####.#####.##.#####.####.#", "#o..##.......  .......##..o#", "###.##.##.########.##.##.###", "###.##.##.########.##.##.###", "#......##....##....##......#", "#.##########.##.##########.#", "#.##########.##.##########.#", "#..........................#", "############################" ], "B": [ "############################", "#......##############......#", "#.####.##############.####.#", "#o####.##############.####o#", "#.####.##############.####.#", "#.####.##..................#", "#.####.##.########.##.####.#", "#.####.##.########.##.####.#", "#......##....##....##......#", "######.##### ## #####.######", "######.##### ## #####.######", "######.##          ##.######", "######.## ###--### ##.######", "######.## #      # ##.######", "      .   #      #   .      ", "######.## #      # ##.######", "######.## ######## ##.######", "######.##          ##.######", "######.## ######## ##.######", "######.## ######## ##.######", "#.........########.........#", "#.####.##############.####.#", "#.####.##############.####.#", "#o..##.......  .......##..o#", "###.##.###########.##.##.###", "###.##.###########.##.##.###", "#......########....##......#", "#.#############.##########.#", "#.#############.##########.#", "#..........................#", "############################" ], "C": [ "############################", "#............########......#", "#.####.#####.########.####.#", "#o####.#####.########.####o#", "#.####.#####.########.####.#", "#..........................#", "######.##.########.##.######", "######.##.########.##.######", "######.##....##....##.######", "######.##### ## #####.######", "######.##### ## #####.######", "######.##          ##.######", "######.## ###--### ##.######", "######.## #      # ##.######", "      .   #      #   .      ", "######.## #      # ##.######", "######.## ######## ##.######", "######.##          ##.######", "######.## ######## ##.######", "######.## ######## ##.######", "#.........########.........#", "#.###################.####.#", "#.###################.####.#", "#o..##.......  .......##..o#", "###.##.##.###########.##.###", "###.##.##.###########.##.###", "#......##....########......#", "#.##########.#############.#", "#.##########.#############.#", "#..........................#", "############################" ], "D": [ "############################", "#......########............#", "#.####.########.#####.####.#", "#o####.########.#####.####o#", "#.####.########.#####.####.#", "#......##..................#", "#.####.##.########.##.####.#", "#.####.##.########.##.####.#", "#......##....##....##......#", "######.##### ## #####.######", "######.##### ## #####.######", "######.##          ##.######", "######.## ###--### ##.######", "######.## #      # ##.######", "      .   #      #   .      ", "######.## #      # ##.######", "######.## ######## ##.######", "######.##          ##.######", "######.## ######## ##.######", "######.## ######## ##.######", "#............##............#", "#.##########.##.##########.#", "#.##########.##.##########.#", "#o..##.......  .......##..o#", "###.##.###########.##.##.###", "###.##.###########.##.##.###", "#......########....##......#", "#.#############.##########.#", "#.#############.##########.#", "#..........................#", "############################" ]
+};
+MAPS.C[12] = MAPS.C[12].replace('--', '  ');   // stage 3: the central room has an open entrance (no door)
+const WAIT_SPOTS = [[1, 1], [26, 1], [1, 20], [26, 20]];   // stage 3: dogs wait here instead of in the kennel
+let MAZE = MAPS.A;
+
+const THEMES = {
+  ground:  { fa: '#d9dbe0', fb: '#d1d3d9', wa: '#2a2c34', wb: '#2e3139', hi: '#585c69', hi2: '#464a56', lo: '#121317', ink: '#17181d' },
+  under1:  { fa: '#b4bac8', fb: '#abb1c0', wa: '#1d2029', wb: '#21242e', hi: '#454a5c', hi2: '#383c4c', lo: '#0b0c11', ink: '#10131a' },
+  under2:  { fa: '#b1abc3', fb: '#a8a2bb', wa: '#201b2c', wb: '#251f33', hi: '#4c4560', hi2: '#3d3750', lo: '#0c0913', ink: '#14101c' },
+  bedroom: { fa: '#dcc08f', fb: '#d3b583', wa: '#5a3f2e', wb: '#614534', hi: '#a58263', hi2: '#8a6a50', lo: '#2c1c12', ink: '#2a1a0e' },
+};
+
+// stairs: goal ones end the stage once the stage's condition (st.need) is met
+const STAGES = {
+  1: { name: 'GROUND FLOOR',  map: 'A', theme: 'ground',  start: [14, 23], dogs: 2, robots: 1, aliens: true,
+       stairs: [{ x: 6, y: 3, dir: 'down', goal: true }], need: 'none', crew: [],
+       brief: ['REACH THE STAIRS DOWN.', 'ALIENS GUARD THEM.'] },
+  2: { name: 'UNDERGROUND 1', map: 'B', theme: 'under1',  start: [25, 5], dogs: 3, robots: 1, key: true,
+       stairs: [{ x: 25, y: 5, dir: 'up', goal: false }, { x: 2, y: 29, dir: 'down', goal: true }], need: 'key', crew: [],
+       brief: ['FIND THE KEY.', 'THEN TAKE THE STAIRS DOWN.'] },
+  3: { name: 'UNDERGROUND 2', map: 'C', theme: 'under2',  start: [25, 29], dogs: 3, robots: 2, cage: true,
+       stairs: [{ x: 25, y: 29, dir: 'up', goal: true }], need: 'team', crew: ['man'],
+       brief: ['GO TO THE DARK ROOM IN THE CENTER.', 'THE KEY TURNS ON THE LIGHT.', 'UNTIE HIM, THEN GO BACK UP.'] },
+  4: { name: 'UNDERGROUND 1', map: 'B', theme: 'under1',  start: [2, 29], dogs: 4, robots: 2, team: ['man'],
+       stairs: [{ x: 2, y: 29, dir: 'down', goal: false }, { x: 25, y: 5, dir: 'up', goal: true }], need: 'team', crew: ['man'],
+       brief: ['BRING HIM BACK UP.', 'MORE DOGS, MORE ROBOTS.'] },
+  5: { name: 'GROUND FLOOR',  map: 'A', theme: 'ground',  start: [6, 3], dogs: 5, robots: 3, team: ['man'], items: true, exit: true,
+       stairs: [{ x: 6, y: 3, dir: 'down', goal: false }], need: 'team', crew: ['man'],
+       brief: ['MEMORIES CAN SLOW HIM DOWN.', 'AVOID: PICTURE, MUSIC NOTE,', 'COLOR PENCIL, TEAL GUITAR.'] },
+  6: { name: 'BEDROOM HALL',  map: 'D', theme: 'bedroom', start: [3, 29], dogs: 4, robots: 2, team: ['man'], beds: true, exit: true,
+       stairs: [], need: 'team', crew: ['man', 'pink', 'black'],
+       brief: ['WAKE THE TWO GIRLS.', 'THEN ESCAPE ALL TOGETHER.'] },
+};
+
+// bedroom hall: wall blocks that are drawn as rooms with beds (tile rectangles)
+const ROOMS_D = [
+  { x: 2, y: 2, w: 4, h: 3 }, { x: 16, y: 2, w: 5, h: 3 }, { x: 22, y: 2, w: 4, h: 3 }, { x: 7, y: 1, w: 5, h: 4 },
+  { x: 2, y: 6, w: 4, h: 2 }, { x: 22, y: 6, w: 4, h: 2 }, { x: 10, y: 6, w: 8, h: 2 },
+  { x: 2, y: 21, w: 10, h: 2 }, { x: 16, y: 21, w: 10, h: 2 },
+];
+
+const DIRS = {
+  up:    { dx: 0,  dy: -1 },
+  left:  { dx: -1, dy: 0 },
+  down:  { dx: 0,  dy: 1 },
+  right: { dx: 1,  dy: 0 },
+};
+const ORDER = [DIRS.up, DIRS.left, DIRS.down, DIRS.right]; // classic tie-break order
+
+// dogs (classic chase personalities: direct, ambusher, flanker, shy) with their scatter corners
+const DOG_DEF = [
+  { name: 'blinky', scatter: [25, -3] }, { name: 'pinky', scatter: [2, -3] }, { name: 'inky', scatter: [27, 31] },
+  { name: 'clyde', scatter: [0, 31] }, { name: 'blinky', scatter: [14, 34] },
+];
+const FUR = '#5b3a22', FUR_DARK = '#2f1c0e';
+
+const FLOWER_PTS = [100, 300, 500, 700, 1000, 2000];
+const MAX_HEARTS = 5;           // every flower gives a heart, up to this many
+const BOOST_SECS = 5, BOOST_MUL = 1.3;   // flower speed boost
+const DOT_BOOST = 0.25;         // extra speed (fraction) at full dot charge
+// Calm mode (default) slows the chase, thins out the chasers and drops the shake and rapid flicker.
+const PACE = {
+  calm:   { hero: 0.85, dog: 0.62, robot: 0.65, alien: 0.65, count: 0.6, hurt: 3, alarm: 4, alarmBoost: 1.04, release: 1.6, doom: 12, ready: 4.2, shake: false, flicker: false },
+  normal: { hero: 1,    dog: 1,    robot: 1,    alien: 1,    count: 1,   hurt: 2, alarm: 6, alarmBoost: 1.12, release: 1,   doom: 7,  ready: 2.8, shake: true,  flicker: true },
+};
+let calm = true;
+try { const v = localStorage.getItem('rescue-calm'); if (v !== null) calm = v === '1'; } catch (e) {}
+const P = () => calm ? PACE.calm : PACE.normal;
+const ROBOT_R = 5;              // alarm radius, in tiles
+const ROBOT_SPEED = 3;          // tiles per second (slow), before the pace setting
+const ALIEN_SPEED = 2.8;        // tiles per second along the stair ring
+const NO_UP = new Set(['12,11', '15,11', '12,23', '15,23']); // dogs can't turn up here (classic)
+
+// the sleeping room at the top centre of the maze (cage in stage 3, bed in stage 6)
+const CAGE = { x0: 13 * T + 3, x1: 15 * T - 3, y0: TOP + 3, y1: TOP + 5 * T - 3 };
+const SLEEP = { x: 14, y: (CAGE.y1 - 24 - TOP) / T };   // where he lies in the cage, in tile units
+const BED_SPOTS = { pink: { x: 14, y: 2.15 }, black: { x: 14, y: 3.5 } };
+const EXIT_Y = 30;              // exit door sits in the bottom wall, below tiles (13..14, 29)
+const LAG = { man: 2, pink: 3.8, black: 5.6 };   // tiles each freed friend stays behind the hero
+const RING = [];                                 // loop of tiles the aliens walk around the stairs (ground floor)
+for (let x = 1; x <= 6; x++) RING.push([x, 1]);
+for (let y = 2; y <= 5; y++) RING.push([6, y]);
+for (let x = 5; x >= 1; x--) RING.push([x, 5]);
+for (let y = 4; y >= 2; y--) RING.push([1, y]);
+
+let INK = '#17181d';
+
+// touch devices get the on-screen D-pad (add ?touch to the URL to try it on a computer)
+const TOUCH = matchMedia('(pointer: coarse)').matches || /[?&]touch/.test(location.search);
+if (TOUCH) {
+  document.body.classList.add('touch');
+  document.getElementById('side').appendChild(document.getElementById('btns'));
+}
+
+// ---------------------------------------------------------------- helpers
+const wrapX = x => (x + COLS) % COLS;
+const cell = (x, y) => (y < 0 || y >= ROWS) ? '#' : MAZE[y][wrapX(x)];
+const open = (x, y) => { const c = cell(x, y); return c !== '#' && c !== '-'; };
+const approach = (v, target, d) => Math.abs(target - v) <= d ? target : v + Math.sign(target - v) * d;
+const clamp01 = v => Math.max(0, Math.min(1, v));
+const lerp = (a, b, u) => a + (b - a) * u;
+const pick = arr => arr[Math.floor(Math.random() * arr.length)];
+
+// ---------------------------------------------------------------- pixel sprites
+// Each sprite is a small grid of palette letters; one grid cell is PX canvas units (chunky 8-bit look).
+// Every sprite also gets a dark silhouette (img.sh) that spr() draws behind it as an outline.
+const PX = 2;
+function tinted(c, color) {
+  const o = document.createElement('canvas');
+  o.width = c.width; o.height = c.height;
+  const g = o.getContext('2d');
+  g.drawImage(c, 0, 0);
+  g.globalCompositeOperation = 'source-in';
+  g.fillStyle = color; g.fillRect(0, 0, o.width, o.height);
+  return o;
+}
+function makeSprite(rows, pal, flip) {
+  const h = rows.length, w = rows[0].length;
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const g = c.getContext('2d');
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const ch = rows[y][flip ? w - 1 - x : x];
+    if (ch !== '.' && pal[ch]) { g.fillStyle = pal[ch]; g.fillRect(x, y, 1, 1); }
+  }
+  c.sh = tinted(c, '#101116');
+  return c;
+}
+// build {down, up, right, left} -> [frame0, frame1] from art that only draws down / up / right
+function makeSet(art, pal) {
+  const o = {};
+  for (const d of ['down', 'up', 'right']) o[d] = art[d].map(f => makeSprite(f, pal, false));
+  o.left = art.right.map(f => makeSprite(f, pal, true));
+  return o;
+}
+const closedEyes = rows => rows.map(r => r.replace(/E/g, 'e'));
+
+// people: 7 wide x 8 tall.  H hair, S skin, E eyes, e closed eyes, W shirt, P trousers
+const MAN_ART = {
+  down: [
+    ['.HHHHH.', 'HHHHHHH', 'HSSSSSH', 'HSESESH', '.SSSSS.', 'WWWWWWW', '.WWWWW.', '.P...P.'],
+    ['.HHHHH.', 'HHHHHHH', 'HSSSSSH', 'HSESESH', '.SSSSS.', 'WWWWWWW', '.WWWWW.', '..P.P..'],
+  ],
+  up: [
+    ['.HHHHH.', 'HHHHHHH', 'HHHHHHH', 'HHHHHHH', '.HHHHH.', 'WWWWWWW', '.WWWWW.', '.P...P.'],
+    ['.HHHHH.', 'HHHHHHH', 'HHHHHHH', 'HHHHHHH', '.HHHHH.', 'WWWWWWW', '.WWWWW.', '..P.P..'],
+  ],
+  right: [
+    ['.HHHHH.', 'HHHHHHH', 'HHHSSSS', 'HHSSESS', '.HSSSS.', '..WWWW.', '..WWWW.', '..P.P..'],
+    ['.HHHHH.', 'HHHHHHH', 'HHHSSSS', 'HHSSESS', '.HSSSS.', '..WWWW.', '..WWWW.', '...PP..'],
+  ],
+};
+// girls wear their hair long
+const GIRL_ART = {
+  down: [
+    ['.HHHHH.', 'HHHHHHH', 'HSSSSSH', 'HSESESH', 'HSSSSSH', 'HWWWWWH', '.WWWWW.', '.P...P.'],
+    ['.HHHHH.', 'HHHHHHH', 'HSSSSSH', 'HSESESH', 'HSSSSSH', 'HWWWWWH', '.WWWWW.', '..P.P..'],
+  ],
+  up: [
+    ['.HHHHH.', 'HHHHHHH', 'HHHHHHH', 'HHHHHHH', 'HHHHHHH', 'HHHHHHH', '.WWWWW.', '.P...P.'],
+    ['.HHHHH.', 'HHHHHHH', 'HHHHHHH', 'HHHHHHH', 'HHHHHHH', 'HHHHHHH', '.WWWWW.', '..P.P..'],
+  ],
+  right: [
+    ['.HHHHH.', 'HHHHHHH', 'HHHSSSS', 'HHSSESS', 'HHHSSS.', 'HHWWWW.', '..WWWW.', '..P.P..'],
+    ['.HHHHH.', 'HHHHHHH', 'HHHSSSS', 'HHSSESS', 'HHHSSS.', 'HHWWWW.', '..WWWW.', '...PP..'],
+  ],
+};
+// the first friend you free has spiky hair (same body, spikes on the top row)
+const spikyArt = art => {
+  const o = {};
+  for (const d of ['down', 'up', 'right']) o[d] = art[d].map(f => ['H.H.H.H', ...f.slice(1)]);
+  return o;
+};
+const MAN_SPIKY = spikyArt(MAN_ART);
+// the black-haired girl: short bob, white dress, bare legs
+const BOB_ART = {
+  down: [
+    ['.HHHHH.', 'HHHHHHH', 'HSSSSSH', 'HSESESH', '.SSSSS.', '.WWWWW.', 'WWWWWWW', '.S...S.'],
+    ['.HHHHH.', 'HHHHHHH', 'HSSSSSH', 'HSESESH', '.SSSSS.', '.WWWWW.', 'WWWWWWW', '..S.S..'],
+  ],
+  up: [
+    ['.HHHHH.', 'HHHHHHH', 'HHHHHHH', 'HHHHHHH', '.HHHHH.', '.WWWWW.', 'WWWWWWW', '.S...S.'],
+    ['.HHHHH.', 'HHHHHHH', 'HHHHHHH', 'HHHHHHH', '.HHHHH.', '.WWWWW.', 'WWWWWWW', '..S.S..'],
+  ],
+  right: [
+    ['.HHHHH.', 'HHHHHHH', 'HHHSSSS', 'HHSSESS', '.HSSSS.', '..WWW..', '.WWWWW.', '..S.S..'],
+    ['.HHHHH.', 'HHHHHHH', 'HHHSSSS', 'HHSSESS', '.HSSSS.', '..WWW..', '.WWWWW.', '...SS..'],
+  ],
+};
+const HERO_PAL = { H: '#15151c', S: '#f6cfa6', E: '#ff1a1a', W: '#ffffff', P: '#2c3e78' };
+const MAN_PAL = { H: '#cfd3da', S: '#f6cfa6', E: '#12c9bd', e: '#9a7458', W: '#ffffff', P: '#5d6675' };
+const PINK_PAL = { H: '#ff8fc0', S: '#f6cfa6', E: '#ffd21f', e: '#9a7458', W: '#ffe3ef', P: '#c9b7e8' };     // yellow eyes
+const BLACKG_PAL = { H: '#15151c', S: '#f6cfa6', E: '#8a4bd8', e: '#9a7458', W: '#ffffff', P: '#f4f4f8' };   // purple eyes
+
+// dogs: B fur, D dark fur (ears/paws), W eye, N nose, T tongue, C collar
+const DOG_ART = {
+  right: [
+    ['.....DD..', 'B....DBBB', 'BB...BBWB', '.BBBBCBBN', '.BBBBCBTB', '.BBBBBBB.', '.BB...BB.', '.DD...DD.'],
+    ['.....DD..', 'B....DBBB', 'BB...BBWB', '.BBBBCBBN', '.BBBBCBTB', '.BBBBBBB.', '..BB.BB..', '..DD.DD..'],
+  ],
+  down: [
+    ['D.....D', 'DBBBBBD', 'DBWBWBD', '.BBNBB.', '..BTB..', '.CCCCC.', '.B...B.'],
+    ['D.....D', 'DBBBBBD', 'DBWBWBD', '.BBNBB.', '..BTB..', '.CCCCC.', '..B.B..'],
+  ],
+  up: [
+    ['D.....D', 'DBBBBBD', 'DBBBBBD', '.BBBBB.', '.CCCCC.', '.BBDBB.', '.B...B.'],
+    ['D.....D', 'DBBBBBD', 'DBBBBBD', '.BBBBB.', '.CCCCC.', '.BBDBB.', '..B.B..'],
+  ],
+};
+const dogPal = eye => ({ B: FUR, D: FUR_DARK, W: eye, N: '#111111', T: '#ff6b8a', C: '#9b1c1c' });
+
+// round robot: D outline, M body, L highlight, E/Y red lens, R antenna light
+const ROBOT_ART = [
+  '....R....', '....D....', '..DDDDD..', '.DMLLMMD.', 'DMLMMMMMD',
+  'DMDDDDDMD', 'DMDEYEDMD', 'DMDDDDDMD', '.DMMMMMD.', '..DDDDD..',
+];
+const robotPal = (lens, glow, lamp) => ({ D: '#2a2d36', M: '#6b7383', L: '#a2abbb', E: lens, Y: glow, R: lamp });
+
+// alien: purple body, green antennae and tentacles
+const ALIEN_ART = [
+  ['A.......A', '.G.....G.', '..PPPPP..', '.PPPPPPP.', 'PPWWPWWPP', 'PPWKPKWPP', 'PPPPPPPPP', '.PpPPPpP.', 'G.G.G.G.G'],
+  ['A.......A', '.G.....G.', '..PPPPP..', '.PPPPPPP.', 'PPWWPWWPP', 'PPWKPKWPP', 'PPPPPPPPP', '.PpPPPpP.', '.G.G.G.G.'],
+];
+const ALIEN_PAL = { P: '#8f46d8', p: '#4f2399', G: '#5ae06a', W: '#ffffff', K: '#111111', A: '#d4ff7a' };
+
+const FLOWER_ART = [
+  '.RRR.RRR.', 'RRRRDRRRR', 'RRRRDRRRR', 'RRDKKKDRR', 'DDDKKKDDD', 'RRDKKKDRR', 'RRRRDRRRR', 'RRRRDRRRR', '.RRR.RRR.',
+];
+const HEART_ART = ['.RR.RR.', 'RRRRRRR', 'RRRRRRR', '.RRRRR.', '..RRR..', '...R...'];
+const KEY_ART = ['.GG.......', 'G..GGGGGGG', 'G..GGGGGGG', '.GG....G.G'];
+// the memory items of stage 5
+const PAPER_ART = ['WWWWWW', 'WPPPPW', 'WPSSPW', 'WPSSPW', 'WWPPWW', 'WWWWWW'];
+const NOTE_ART = ['..KKKK.', '..KK.KK', '..KK...', '..KK...', '..KK...', 'KKKK...', 'KKKK...', '.KK....'];
+const PENCIL_ART = ['.EE.', '.EE.', '.FF.', '.BB.', '.BB.', '.BB.', '.BB.', '.WW.', '.WW.', '..T.'];
+const GUITAR_ART = ['.TTT.......', 'TTTTTNNNNHH', 'TKKTTWWWWHH', 'TTTTTNNNN..', '.TTT.......'];
+
+const SPR = {
+  hero: makeSet(MAN_ART, HERO_PAL),
+  man: makeSet(MAN_SPIKY, MAN_PAL),
+  pink: makeSet(GIRL_ART, PINK_PAL),
+  black: makeSet(BOB_ART, BLACKG_PAL),
+  manSleep: makeSprite(closedEyes(MAN_SPIKY.down[0]), MAN_PAL),
+  pinkSleep: makeSprite(closedEyes(GIRL_ART.down[0]), PINK_PAL),
+  blackSleep: makeSprite(closedEyes(BOB_ART.down[0]), BLACKG_PAL),
+  dogs: makeSet(DOG_ART, dogPal('#ffffff')),
+  dogsAlert: makeSet(DOG_ART, dogPal('#ff3030')),
+  robot: makeSprite(ROBOT_ART, robotPal('#b02020', '#ff6060', '#ff3030')),
+  robotAlert: makeSprite(ROBOT_ART, robotPal('#ff1a1a', '#ffd0d0', '#ffffff')),
+  alien: ALIEN_ART.map(f => makeSprite(f, ALIEN_PAL)),
+  flower: makeSprite(FLOWER_ART, { R: '#e5112b', D: '#8c0a1c', K: '#0a0a0a' }),
+  heart: makeSprite(HEART_ART, { R: '#ff3b5c' }),
+  key: makeSprite(KEY_ART, { G: '#f2c230' }),
+  paper: makeSprite(PAPER_ART, { W: '#fdfdf6', P: '#ff8fc0', S: '#f6cfa6' }),
+  note: makeSprite(NOTE_ART, { K: '#3a3fc4' }),
+  pencil: makeSprite(PENCIL_ART, { E: '#ff9aaa', F: '#b8bcc6', B: '#2f7cf6', W: '#f0d6a8', T: '#222222' }),
+  guitar: makeSprite(GUITAR_ART, { T: '#1ab5ae', N: '#6b4423', H: '#222222', K: '#111111', W: '#e8e8e8' }),
+};
+const ITEM_KINDS = [
+  { id: 'paper', img: SPR.paper, scale: 1.1, name: 'PINK-HAIR GIRL PICTURE' },     // "very small": about 7 units wide
+  { id: 'note', img: SPR.note, scale: 2, name: 'MUSIC NOTE' },
+  { id: 'pencil', img: SPR.pencil, scale: 2, name: 'COLOR PENCIL' },
+  { id: 'guitar', img: SPR.guitar, scale: 2, name: 'TEAL ELECTRIC GUITAR' },
+];
+
+// ---------------------------------------------------------------- state
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+let state = 'title';            // title | ready | play | dying | clear | over | ending
+let paused = false;
+let time = 0, stateT = 0, dieT = 0, clearT = 0, overT = 0, fadeIn = 0;
+let score = 0, best = 0, hearts = 1, stageNo = 1;
+let st = STAGES[1], theme = THEMES.ground, cp = { n: 1, hearts: 1, score: 0 };
+let want = null;                // buffered direction from input
+let pellets = new Uint8Array(COLS * ROWS);
+let dotsEaten = 0, stageT = 0, hurtT = 0, shakeT = 0, alarmT = 0, dotCharge = 0, boostT = 0, heroSpd = 0;
+let lv = null, sched = [], modeIdx = 0, modeT = 0, ghostMode = 'scatter';
+let bonus = null, popups = [], wakaFlip = false, deathSfx = false, noticeT = 0;
+let pacDist = 0, lastP = { x: 0, y: 0 }, trail = [], cageOpenT = 0, roomOpen = false, esc = null;
+let keyS = { mode: 'wait', t: 4, x: 0, y: 0 };   // wait | out | carried | used
+let hasKey = false, memN = 0, doomT = 0, ending = null, roomLit = false, lightT = 0;
+let team = [], sleepers = [], items = [], robots = [], aliens = [], ghosts = [], bedRooms = [], bgCache = null;
+let meteors = [], flashes = [];
+
+const pac = { tx: 14, ty: 23, dx: 0, dy: 0, p: 0, fx: 0, fy: 1, x: 14.5, y: 23.5, phase: 0, moving: false };
+
+try { best = +localStorage.getItem('rescue-best') || 0; } catch (e) {}
+let muted = false;
+try { muted = localStorage.getItem('rescue-mute') === '1'; } catch (e) {}
+
+// ---------------------------------------------------------------- audio
+let actx = null;
+function audioInit() {
+  if (!actx) {
+    try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { actx = null; }
+  }
+  if (actx && actx.state === 'suspended') actx.resume();
+}
+function tone(f, d, type = 'square', vol = 0.05, f2 = null, delay = 0) {
+  if (muted || !actx) return;
+  const t = actx.currentTime + delay;
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.type = type;
+  o.frequency.setValueAtTime(f, t);
+  if (f2) o.frequency.exponentialRampToValueAtTime(f2, t + d);
+  g.gain.setValueAtTime(vol, t);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + d);
+  o.connect(g); g.connect(actx.destination);
+  o.start(t); o.stop(t + d + 0.02);
+}
+const sfx = {
+  waka()  { wakaFlip = !wakaFlip; tone(wakaFlip ? 420 : 300, 0.07, 'triangle', 0.09, wakaFlip ? 300 : 420); },
+  flower() { [880, 1175, 1568].forEach((f, i) => tone(f, 0.1, 'square', 0.06, null, i * 0.07)); },
+  key()   { [988, 1319, 1976].forEach((f, i) => tone(f, 0.12, 'triangle', 0.09, null, i * 0.09)); },
+  wake()  { [392, 523, 659, 784].forEach((f, i) => tone(f, 0.11, 'square', 0.06, null, i * 0.08)); },
+  hurt()  { tone(220, 0.3, calm ? 'triangle' : 'sawtooth', calm ? 0.05 : 0.08, 55); },
+  alarm() { if (calm) { tone(660, 0.14, 'sine', 0.04); tone(520, 0.2, 'sine', 0.04, null, 0.15); return; } [0, 0.16, 0.32].forEach(d => { tone(900, 0.08, 'square', 0.05, null, d); tone(620, 0.08, 'square', 0.05, null, d + 0.08); }); },
+  stairs() { for (let i = 0; i < 5; i++) tone(500 - i * 60, 0.09, 'triangle', 0.07, null, i * 0.07); },
+  item()  { tone(300, 0.25, 'triangle', 0.08, 180); },
+  sad()   { [392, 330, 262, 196].forEach((f, i) => tone(f, 0.35, 'triangle', 0.08, null, i * 0.3)); },
+  start() {
+    [247, 494, 370, 311, 494, 370, 311, 262, 523, 392, 330, 523, 392, 330]
+      .forEach((f, i) => tone(f, 0.09, 'square', 0.045, null, i * 0.11));
+  },
+  die() { for (let i = 0; i < 10; i++) tone(520 - i * 38, 0.12, 'square', 0.06, 480 - i * 38, i * 0.11); },
+  clear() { [523, 659, 784, 1047, 784, 1047, 1319].forEach((f, i) => tone(f, 0.12, 'square', 0.06, null, i * 0.1)); },
+};
+
+// ---------------------------------------------------------------- stage setup
+function levelParams(n) {
+  const u = 9.5, k = (n - 1) / 5; // tiles/second at "100%" speed; difficulty grows with the stage
+  const p = P();
+  return { pac: (0.8 + 0.1 * k) * u * p.hero, ghost: (0.72 + 0.17 * k) * u * p.dog, tun: (0.4 + 0.1 * k) * u * p.dog };
+}
+function schedule(n) {
+  if (n <= 2) return [7, 20, 7, 20, 5, 20, 5, Infinity];
+  if (n <= 4) return [7, 20, 7, 20, 5, 1033, 1 / 60, Infinity];
+  return [5, 20, 5, 20, 5, 1037, 1 / 60, Infinity];
+}
+
+function place(e) {
+  e.x = e.tx + 0.5 + e.dx * e.p;
+  e.y = e.ty + 0.5 + e.dy * e.p;
+}
+
+const lagMul = () => [1, 1.5, 2.2, 3, 5][memN];
+const followMul = () => [1, 0.85, 0.7, 0.5, 0.2][memN];
+const lagNow = f => LAG[f.id] * lagMul();
+
+function seedTrail() {
+  trail = [{ x: pac.x, y: pac.y, d: pacDist - 80, jump: false }, { x: pac.x, y: pac.y, d: pacDist, jump: false }];
+}
+function addFollower(id, x, y, blend) {
+  if (!trail.length) seedTrail();
+  const f = { id, x, y, sx: x, sy: y, blend, capD: 0, dir: 'down', moving: false };
+  f.capD = pacDist - lagNow(f);
+  team.push(f);
+}
+
+function makeSleepSprite(girl) {
+  const hair = pick(['#e8d36a', '#c0392b', '#6a4a3a', '#2c6fbb', '#7a4fd0', '#3ab07a', '#f08a3c']);
+  const shirt = pick(['#ffb3b3', '#b3d9ff', '#c8f7c5', '#fff2a8', '#e0c3ff']);
+  const pal = { H: hair, S: '#f6cfa6', E: '#333', e: '#9a7458', W: shirt, P: '#4a5470' };
+  return makeSprite(closedEyes((girl ? GIRL_ART : MAN_ART).down[0]), pal);
+}
+
+function loadStage(n) {
+  stageNo = n; st = STAGES[n]; theme = THEMES[st.theme]; INK = theme.ink;
+  MAZE = MAPS[st.map]; lv = levelParams(n); sched = schedule(n);
+  dotsEaten = 0;
+  for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) {
+    const c = MAZE[y][x];
+    pellets[y * COLS + x] = c === '.' ? 1 : c === 'o' ? 2 : 0;
+  }
+  pellets[st.start[1] * COLS + st.start[0]] = 0;
+  st.stairs.forEach(s => { pellets[s.y * COLS + s.x] = 0; });
+
+  // hero stands on the start tile until the first key press
+  Object.assign(pac, { tx: st.start[0], ty: st.start[1], dx: 0, dy: 0, p: 0, fx: 0, fy: 1, phase: 0, moving: false });
+  place(pac);
+  want = null;
+  pacDist = 0; lastP = { x: pac.x, y: pac.y }; trail = []; team = [];
+  hasKey = n === 3; memN = 0; doomT = 0;
+  stageT = 0; hurtT = n > 1 ? P().hurt : 0; shakeT = 0; alarmT = 0; dotCharge = 0; boostT = 0; noticeT = 0;
+  bonus = null; popups = []; esc = null; roomOpen = false; cageOpenT = 0; roomLit = false; lightT = 0;
+  modeIdx = 0; modeT = 0; ghostMode = 'scatter';
+  keyS = { mode: st.key ? 'wait' : 'none', t: 3 + Math.random() * 5, x: 0, y: 0 };
+
+  // dogs: the first waits outside the kennel, the others inside
+  ghosts = [];
+  const nDogs = Math.max(1, Math.round(st.dogs * P().count)), nRobots = Math.max(1, Math.round(st.robots * P().count));
+  for (let i = 0; i < nDogs; i++) {
+    const d = DOG_DEF[i], g = { ...d, i, cool: 0, mode: 'house', tx: 14, ty: 11, dx: -1, dy: 0, p: 0.5, x: 14, y: 14.5 };
+    if (i === 0) { g.mode = 'normal'; place(g); }
+    else if (st.cage) { const w = WAIT_SPOTS[i - 1]; Object.assign(g, { mode: 'wait', tx: w[0], ty: w[1], dx: 0, dy: 0, p: 0 }); place(g); }
+    else { g.dx = 0; g.dy = 0; g.p = 0; g.x = 14 + (i - 1 - (nDogs - 2) / 2) * 1.25; }
+    ghosts.push(g);
+  }
+  // robots on random tiles away from the hero
+  robots = [];
+  const tiles = [];
+  for (let y = 1; y < ROWS - 1; y++) for (let x = 1; x < COLS - 1; x++) {
+    if (!open(x, y) || y === 14 || (x >= 9 && x <= 18 && y >= 9 && y <= 19)) continue;
+    if (Math.abs(x - st.start[0]) + Math.abs(y - st.start[1]) < 12) continue;
+    tiles.push([x, y]);
+  }
+  for (let i = 0; i < nRobots; i++) {
+    let t = null;
+    for (let tries = 0; tries < 60 && !t; tries++) {
+      const c = pick(tiles);
+      if (robots.every(r => Math.abs(r.tx - c[0]) + Math.abs(r.ty - c[1]) > 8)) t = c;
+    }
+    t = t || pick(tiles);
+    const d = ORDER.find(o => open(t[0] + o.dx, t[1] + o.dy));
+    const r = { tx: t[0], ty: t[1], dx: d.dx, dy: d.dy, p: 0.5, alert: false, cool: 0 };
+    place(r); robots.push(r);
+  }
+  // aliens circle the stairs on the ground floor, stage 1
+  aliens = st.aliens ? [0, RING.length / 2].map(s => ({ s, x: 0, y: 0, cool: 0 })) : [];
+  aliens.forEach(a => moveAlien(a, 0));
+
+  // memory items for stage 5
+  items = [];
+  if (st.items) {
+    const spots = [];
+    for (let y = 1; y < ROWS - 1; y++) for (let x = 1; x < COLS - 1; x++) {
+      if (!open(x, y) || y === 14 || y >= 28 || (x >= 9 && x <= 18 && y >= 9 && y <= 19)) continue;
+      if (Math.abs(x - st.start[0]) + Math.abs(y - st.start[1]) < 9) continue;
+      spots.push([x, y]);
+    }
+    for (const k of ITEM_KINDS) {
+      let t = null;
+      for (let tries = 0; tries < 80 && !t; tries++) {
+        const c = pick(spots);
+        if (items.every(it => Math.abs(it.tx - c[0]) + Math.abs(it.ty - c[1]) > 7)) t = c;
+      }
+      t = t || pick(spots);
+      items.push({ ...k, tx: t[0], ty: t[1], x: t[0] + 0.5, y: t[1] + 0.5 });
+    }
+  }
+
+  // sleepers waiting to be rescued
+  sleepers = [];
+  if (st.cage) sleepers.push({ id: 'man', x: 14, y: 14.5, mode: 'asleep', t: 0 });
+  if (st.beds) {
+    sleepers.push({ id: 'pink', x: BED_SPOTS.pink.x, y: BED_SPOTS.pink.y, mode: 'asleep', t: 0 });
+    sleepers.push({ id: 'black', x: BED_SPOTS.black.x, y: BED_SPOTS.black.y, mode: 'asleep', t: 0 });
+  }
+  // bedroom hall: strangers sleeping in the other rooms
+  bedRooms = [];
+  if (st.beds) {
+    for (const r of ROOMS_D) {
+      const bw = 30, bh = 20, cols = Math.max(1, Math.floor((r.w * T - 6) / bw)), rows = Math.max(1, Math.floor((r.h * T - 6) / (bh + 2)));
+      const x0 = r.x * T + (r.w * T - cols * bw) / 2, y0 = TOP + r.y * T + (r.h * T - rows * (bh + 2)) / 2;
+      for (let cy = 0; cy < rows; cy++) for (let cx = 0; cx < cols; cx++) {
+        bedRooms.push({ x: x0 + cx * bw + bw / 2, y: y0 + cy * (bh + 2) + (bh + 2) / 2, w: bw - 2, h: bh,
+          spr: makeSleepSprite(Math.random() < 0.5), blanket: pick(['#ffffff', '#f8f8f4', '#f3f3ef']) });   // all white sheets
+      }
+    }
+  }
+  // freed friends from earlier stages walk with the hero
+  (st.team || []).forEach(id => addFollower(id, pac.x, pac.y, 0));
+  bgCache = null;
+}
+
+function startStage(n) {
+  loadStage(n);
+  cp = { n, hearts, score };
+  state = 'ready'; stateT = P().ready; fadeIn = 0.7;
+}
+function startGame() {
+  score = 0; hearts = 1; ending = null;
+  startStage(1);
+  sfx.start();
+}
+function retryStage() {
+  hearts = Math.max(1, cp.hearts); score = cp.score;
+  startStage(cp.n);
+}
+
+function addScore(n) {
+  score += n;
+  if (score > best) {
+    best = score;
+    try { localStorage.setItem('rescue-best', String(best)); } catch (e) {}
+  }
+}
+function popup(x, y, s, color, life = 0.9) { popups.push({ x, y, text: s, color, t: 0, life }); }
+
+// ---------------------------------------------------------------- movement
+// An entity sits on tile (tx,ty) heading in (dx,dy) with progress p in [0,1) toward the next tile.
+function advance(e, dist, choose) {
+  for (let guard = 0; dist > 0 && guard < 8; guard++) {
+    if (e.dx === 0 && e.dy === 0) { choose(e); if (e.dx === 0 && e.dy === 0) return; }
+    const room = 1 - e.p;
+    if (dist < room) { e.p += dist; return; }
+    dist -= room;
+    e.tx = wrapX(e.tx + e.dx); e.ty += e.dy; e.p = 0;
+    choose(e);
+  }
+}
+function reverseEnt(e) {
+  if (!e.dx && !e.dy) return;
+  e.tx = wrapX(e.tx + e.dx); e.ty += e.dy;
+  e.dx = -e.dx; e.dy = -e.dy;
+  e.p = 1 - e.p;
+  place(e);
+}
+
+function pacChoose(e) {
+  if (want && open(e.tx + want.dx, e.ty + want.dy)) {
+    e.dx = want.dx; e.dy = want.dy; e.fx = e.dx; e.fy = e.dy;
+    return;
+  }
+  if (e.dx || e.dy) {
+    if (!open(e.tx + e.dx, e.ty + e.dy)) { e.dx = 0; e.dy = 0; }
+    else { e.fx = e.dx; e.fy = e.dy; }
+  }
+}
+
+function ghostTarget(g) {
+  if (g.cool > 0) return g.scatter;               // just tackled: back off for a moment
+  if (alarmT > 0) return [pac.tx, pac.ty];        // the alarm is ringing: everybody comes this way
+  if (ghostMode === 'scatter') return g.scatter;
+  const px = pac.tx, py = pac.ty, fx = pac.fx, fy = pac.fy;
+  switch (g.name) {
+    case 'pinky': return [px + 4 * fx - (fy === -1 ? 4 : 0), py + 4 * fy];
+    case 'inky': {
+      const ax = px + 2 * fx - (fy === -1 ? 2 : 0), ay = py + 2 * fy, b = ghosts[0];
+      return [b.tx + 2 * (ax - b.tx), b.ty + 2 * (ay - b.ty)];
+    }
+    case 'clyde': {
+      const dx = g.tx - px, dy = g.ty - py;
+      return dx * dx + dy * dy > 64 ? [px, py] : g.scatter;
+    }
+    default: return [px, py];
+  }
+}
+
+function ghostChoose(g) {
+  const cand = [];
+  for (const d of ORDER) {
+    if ((g.dx || g.dy) && g.dx === -d.dx && g.dy === -d.dy) continue;
+    if (!open(g.tx + d.dx, g.ty + d.dy)) continue;
+    if (d === DIRS.up && NO_UP.has(g.tx + ',' + g.ty)) continue;
+    cand.push(d);
+  }
+  if (!cand.length) cand.push({ dx: -g.dx, dy: -g.dy });
+  const [tx, ty] = ghostTarget(g);
+  let best = cand[0], bd = 1e9;
+  for (const d of cand) {
+    const nx = g.tx + d.dx, ny = g.ty + d.dy;
+    const v = (nx - tx) * (nx - tx) + (ny - ty) * (ny - ty);
+    if (v < bd) { bd = v; best = d; }
+  }
+  g.dx = best.dx; g.dy = best.dy;
+}
+
+function ghostSpeed(g) {
+  if (g.ty === 14 && (g.tx < 6 || g.tx > 21)) return lv.tun;
+  return lv.ghost * (alarmT > 0 ? P().alarmBoost : 1);
+}
+
+function moveGhost(g, dt) {
+  const sp = 3.5 * dt;
+  switch (g.mode) {
+    case 'house':
+      g.y = 14.5 + Math.sin(time * 7 + g.i * 2) * 0.2;
+      break;
+    case 'leaving':
+      if (g.y > 11.5 && Math.abs(g.x - 14) > 0.001) {
+        g.y = approach(g.y, 14.5, sp); g.x = approach(g.x, 14, sp);
+      } else if (g.y > 11.5) {
+        g.y = approach(g.y, 11.5, sp);
+      } else {
+        Object.assign(g, { mode: 'normal', tx: 14, ty: 11, dx: -1, dy: 0, p: 0.5 });
+        place(g);
+      }
+      break;
+    default:
+      advance(g, ghostSpeed(g) * dt, ghostChoose);
+      place(g);
+  }
+}
+
+// a dog leaves the kennel, or gets up from where it was waiting in the maze
+function releaseDog(g) {
+  if (g.mode === 'house') { g.mode = 'leaving'; return; }
+  const d = ORDER.find(o => open(g.tx + o.dx, g.ty + o.dy));
+  g.dx = d.dx; g.dy = d.dy; g.p = 0; g.mode = 'normal'; place(g);
+}
+
+// robots amble around at random
+function robotChoose(e) {
+  const cand = ORDER.filter(d => open(e.tx + d.dx, e.ty + d.dy) && !(e.dx === -d.dx && e.dy === -d.dy));
+  const d = cand.length ? pick(cand) : { dx: -e.dx, dy: -e.dy };
+  e.dx = d.dx; e.dy = d.dy;
+}
+
+// aliens walk the ring around the stairs
+function moveAlien(a, dt) {
+  a.s = (a.s + ALIEN_SPEED * P().alien * dt) % RING.length;
+  const i = Math.floor(a.s), f = a.s - i, p = RING[i], q = RING[(i + 1) % RING.length];
+  a.x = lerp(p[0], q[0], f) + 0.5; a.y = lerp(p[1], q[1], f) + 0.5;
+  a.dir = q[0] > p[0] ? 'right' : q[0] < p[0] ? 'left' : q[1] > p[1] ? 'down' : 'up';
+}
+
+// ---------------------------------------------------------------- game rules
+const near = (a, b, r) => {
+  let dx = Math.abs(a.x - b.x); dx = Math.min(dx, COLS - dx);
+  const dy = a.y - b.y;
+  return dx * dx + dy * dy < r * r;
+};
+const dist2 = (a, b) => { let dx = Math.abs(a.x - b.x); dx = Math.min(dx, COLS - dx); return Math.hypot(dx, a.y - b.y); };
+
+function collectFlower(pts, x, y) {
+  addScore(pts);
+  const gained = hearts < MAX_HEARTS;
+  hearts = Math.min(MAX_HEARTS, hearts + 1);
+  boostT = BOOST_SECS;
+  popup(x, y, gained ? '+1 ♥' : String(pts), '#ff3b5c', 1.2);
+  sfx.flower();
+}
+
+function loseLife() {
+  state = 'dying'; dieT = 0; deathSfx = false;
+}
+
+// a dog, robot or alien tackles the hero: lose a heart, the attacker backs off
+function hurt(src) {
+  if (hurtT > 0) return;
+  hearts--; hurtT = P().hurt; shakeT = P().shake ? 0.3 : 0;
+  popup(pac.x, pac.y - 0.6, '-1 ♥', '#ff2a2a', 1);
+  sfx.hurt();
+  if (src) { src.cool = 2.5; reverseEnt(src); }
+  if (hearts <= 0) loseLife();
+}
+
+function eatPellet() {
+  const onNext = pac.p >= 0.5;
+  const x = onNext ? wrapX(pac.tx + pac.dx) : pac.tx, y = onNext ? pac.ty + pac.dy : pac.ty;
+  if ((onNext ? 1 - pac.p : pac.p) > 0.3) return;
+  const idx = y * COLS + x, v = pellets[idx];
+  if (!v) return;
+  pellets[idx] = 0;
+  dotsEaten++;
+  if (v === 1) { addScore(10); dotCharge = Math.min(1, dotCharge + 0.2); sfx.waka(); }
+  else collectFlower(FLOWER_PTS[stageNo - 1], x + 0.5, y + 0.5);
+  if (dotsEaten === 70 || dotsEaten === 170) bonus = { t: 9.5 };
+}
+
+// stage 2: the key shows up somewhere out in the maze after a random delay
+function spawnKey() {
+  const cands = [];
+  for (let y = 1; y < ROWS - 1; y++) for (let x = 1; x < COLS - 1; x++) {
+    if (!open(x, y) || y === 14) continue;
+    if (x >= 9 && x <= 18 && y >= 11 && y <= 17) continue;            // kennel
+    if (Math.abs(x - pac.tx) + Math.abs(y - pac.ty) < 12) continue;   // not right under the hero's nose
+    cands.push([x, y]);
+  }
+  const [x, y] = pick(cands);
+  keyS = { mode: 'out', t: 0, x: x + 0.5, y: y + 0.5 };
+  popup(keyS.x, keyS.y - 1, 'KEY!', '#f2c230', 1.6);
+  sfx.key();
+}
+
+function wakeSleepers() {
+  roomOpen = true; cageOpenT = 0;
+  sleepers.forEach(s => { s.mode = 'waking'; s.t = 1.1; });
+  if (st.cage) hasKey = false;
+  addScore(500);
+  sfx.wake();
+}
+
+function trailAt(d) {
+  let i = 0;
+  while (i < trail.length - 2 && trail[i + 1].d < d) i++;
+  const a = trail[i], b = trail[i + 1];
+  if (!b || d <= a.d) return a;
+  if (b.jump) return d >= b.d ? b : a;
+  const u = clamp01((d - a.d) / ((b.d - a.d) || 1));
+  return { x: lerp(a.x, b.x, u), y: lerp(a.y, b.y, u) };
+}
+
+function updateTeam(dt) {
+  for (const s of sleepers) {
+    if (s.mode !== 'waking') continue;
+    s.t -= dt;
+    if (s.t <= 0) { s.done = true; addFollower(s.id, s.x, s.y, 1); }
+  }
+  sleepers = sleepers.filter(s => !s.done);
+  const sp = Math.max(9, heroSpd * 1.15) * followMul();
+  for (const f of team) {
+    f.blend = Math.max(0, f.blend - dt / 0.6);
+    const target = pacDist - lagNow(f), bx = f.x, by = f.y;
+    if (f.capD < target) f.capD = Math.min(target, f.capD + sp * dt);
+    const p = trailAt(f.capD);
+    f.x = lerp(p.x, f.sx, f.blend); f.y = lerp(p.y, f.sy, f.blend);
+    const mx = f.x - bx, my = f.y - by;
+    f.moving = Math.hypot(mx, my) > 0.002 && Math.abs(mx) < COLS / 2;
+    if (f.moving) f.dir = Math.abs(mx) > Math.abs(my) ? (mx > 0 ? 'right' : 'left') : (my > 0 ? 'down' : 'up');
+  }
+  if (team.length) {
+    const minD = Math.min(...team.map(f => f.capD));
+    while (trail.length > 2 && trail[1].d < minD) trail.shift();
+  }
+}
+
+// every required friend is with the hero and close enough
+function crewReady() {
+  return st.crew.every(id => {
+    const f = team.find(m => m.id === id);
+    return f && f.blend <= 0 && dist2(f, pac) < lagNow(f) + 1.8;
+  });
+}
+function goalReady() {
+  if (st.need === 'none') return true;
+  if (st.need === 'key') return hasKey;
+  return crewReady();
+}
+function notReadyText() {
+  if (st.need === 'key') return 'NEED THE KEY!';
+  if (st.cage && sleepers.length) return 'FREE HIM FIRST!';
+  if (st.beds && sleepers.length) return 'WAKE THE GIRLS!';
+  return 'WAIT FOR THEM!';
+}
+
+function finishStage(kind, tx, ty) {
+  state = 'clear'; clearT = 0;
+  esc = { hx: pac.x, hy: pac.y, tx, ty, kind, f: team.map(f => ({ id: f.id, x: f.x, y: f.y })) };
+  addScore(1000);
+  if (kind === 'exit') sfx.clear(); else sfx.stairs();
+}
+
+function advanceStage() {
+  if (stageNo === 5) {
+    if (memN === 0) beginEnding('success');
+    else startStage(6);
+  } else if (stageNo === 6) beginEnding('true');
+  else startStage(stageNo + 1);
+}
+
+function beginEnding(kind) {
+  state = 'ending'; ending = { kind, t: 0 };
+  meteors = []; flashes = [];
+  if (kind === 'bad') sfx.sad(); else sfx.clear();
+}
+
+function step(dt) {
+  stageT += dt;
+  modeT += dt;
+  if (modeT >= sched[modeIdx]) {
+    modeT = 0; modeIdx++;
+    ghostMode = modeIdx % 2 ? 'chase' : 'scatter';
+    ghosts.forEach(g => { if (g.mode === 'normal') reverseEnt(g); });
+  }
+  if (boostT > 0) boostT = Math.max(0, boostT - dt);
+  if (hurtT > 0) hurtT = Math.max(0, hurtT - dt);
+  if (alarmT > 0) alarmT = Math.max(0, alarmT - dt);
+  if (noticeT > 0) noticeT -= dt;
+  if (roomOpen) cageOpenT += dt;
+  dotCharge = Math.max(0, dotCharge - 0.45 * dt);
+
+  // dogs leave the kennel on a timer
+  const gap = (stageNo >= 4 ? 2.5 : 3.5) * P().release;
+  ghosts.forEach((g, i) => { if ((g.mode === 'house' || g.mode === 'wait') && stageT >= gap * i) releaseDog(g); });
+
+  if (keyS.mode === 'wait') { keyS.t -= dt; if (keyS.t <= 0) spawnKey(); }
+
+  // hero
+  if (want && (pac.dx || pac.dy) && want.dx === -pac.dx && want.dy === -pac.dy) reverseEnt(pac);
+  heroSpd = lv.pac * (boostT > 0 ? BOOST_MUL : 1) * (1 + DOT_BOOST * dotCharge);
+  advance(pac, heroSpd * dt, pacChoose);
+  place(pac);
+  pac.moving = !!(pac.dx || pac.dy);
+  if (pac.moving) pac.phase += dt * (heroSpd > lv.pac * 1.1 ? 20 : 16);
+  { // distance walked, so freed friends can retrace the hero's path
+    const dx = pac.x - lastP.x;
+    const jump = Math.abs(dx) > COLS / 2;
+    pacDist += jump ? 0 : Math.hypot(dx, pac.y - lastP.y);
+    lastP = { x: pac.x, y: pac.y };
+    if (team.length) {
+      const last = trail[trail.length - 1];
+      if (jump || pacDist - last.d >= 0.12) trail.push({ x: pac.x, y: pac.y, d: pacDist, jump });
+    }
+  }
+  eatPellet();
+
+  // key, memory items, the sleeping room
+  if (keyS.mode === 'out' && Math.hypot(pac.x - keyS.x, pac.y - keyS.y) < 0.7) {
+    keyS.mode = 'carried'; hasKey = true;
+    addScore(200); popup(pac.x, pac.y - 0.8, 'GOT THE KEY', '#f2c230', 1.4); sfx.key();
+  }
+  for (const it of items) {
+    if (!it.hit && Math.hypot(pac.x - it.x, pac.y - it.y) < 0.65) {
+      it.hit = true; memN++; sfx.item();
+      popup(it.x, it.y - 0.9, it.name, '#ffe27a', 3);                           // the item's name
+      popup(it.x, it.y - 0.2, memN >= 4 ? 'HE CAN\'T KEEP UP...' : 'HE STOPS TO LOOK...', '#d9b8ff', 3);
+      if (memN >= 4) doomT = P().doom;
+    }
+  }
+  items = items.filter(it => !it.hit);
+  if (roomLit) lightT += dt;
+  if (st.cage && !roomLit && pac.tx >= 11 && pac.tx <= 16 && pac.ty >= 13 && pac.ty <= 15) {
+    // walking into the dark room with the key turns the light on
+    if (hasKey) {
+      roomLit = true; lightT = 0; hasKey = false; keyS.mode = 'used';
+      popup(14, 12.3, 'LIGHTS ON!', '#ffe27a', 1.8); sfx.wake();
+    } else if (noticeT <= 0) { noticeT = 2; popup(pac.x, pac.y - 0.8, 'TOO DARK... NEED THE KEY', '#ff5a5a', 1.6); }
+  }
+  if (st.cage && roomLit && sleepers.some(s => s.mode === 'asleep') && Math.hypot(pac.x - 14, pac.y - 14.5) < 1.1) wakeSleepers();   // cut the straps
+  if (st.beds && sleepers.some(s => s.mode === 'asleep') && pac.ty === 5 && (pac.tx === 13 || pac.tx === 14)) wakeSleepers();
+  updateTeam(dt);
+
+  // stairs and exit
+  for (const s of st.stairs) {
+    if (!s.goal || pacDist < 0.8 || Math.hypot(pac.x - (s.x + 0.5), pac.y - (s.y + 0.5)) > 0.55) continue;
+    if (goalReady()) { finishStage(s.dir, s.x + 0.5, s.y + 0.5); return; }
+    if (noticeT <= 0) { noticeT = 2; popup(pac.x, pac.y - 0.8, notReadyText(), '#ff5a5a', 1.4); }
+  }
+  if (st.exit && pac.ty === 29 && pac.tx >= 12 && pac.tx <= 15) {
+    if (goalReady()) { finishStage('exit', 14, EXIT_Y + 0.4); return; }
+    if (noticeT <= 0) { noticeT = 2; popup(pac.x, pac.y - 0.8, notReadyText(), '#ff5a5a', 1.4); }
+  }
+
+  // dogs, robots, aliens
+  for (const g of ghosts) {
+    if (g.cool > 0) g.cool -= dt;
+    moveGhost(g, dt);
+  }
+  for (const r of robots) {
+    if (r.cool > 0) r.cool -= dt;
+    advance(r, ROBOT_SPEED * P().robot * dt, robotChoose);
+    place(r);
+    r.alert = dist2(r, pac) < ROBOT_R;
+    if (r.alert) {
+      if (alarmT <= 0) { sfx.alarm(); popup(r.x, r.y - 1, 'ALARM!', '#ff2a2a', 1.2); }
+      alarmT = P().alarm;
+      ghosts.forEach(g => { if (g.mode === 'house' || g.mode === 'wait') releaseDog(g); });
+    }
+  }
+  aliens.forEach(a => moveAlien(a, dt));
+
+  // tackles
+  for (const g of ghosts) {
+    if ((g.mode === 'normal' || g.mode === 'leaving') && near(pac, g, 0.6)) { hurt(g); if (state !== 'play') return; }
+  }
+  for (const r of robots) if (near(pac, r, 0.7)) { hurt(r); if (state !== 'play') return; }
+  for (const a of aliens) if (near(pac, a, 0.65)) { hurt(a); if (state !== 'play') return; }
+
+  if (bonus) {
+    bonus.t -= dt;
+    if (bonus.t <= 0) bonus = null;
+    else if (Math.abs(pac.x - 14) < 0.8 && Math.abs(pac.y - 17.5) < 0.5) {
+      collectFlower(FLOWER_PTS[stageNo - 1], 14, 17.5);
+      bonus = null;
+    }
+  }
+
+  // bad end: he can't keep up any more
+  if (doomT > 0) { doomT -= dt; if (doomT <= 0) { beginEnding('bad'); return; } }
+}
+
+function tick(dt) {
+  time += dt;
+  if (shakeT > 0) shakeT = Math.max(0, shakeT - dt);
+  if (fadeIn > 0) fadeIn = Math.max(0, fadeIn - dt);
+  popups.forEach(p => { p.t += dt; });
+  popups = popups.filter(p => p.t < p.life);
+  switch (state) {
+    case 'title':
+      ghosts.forEach(g => { if (g.mode === 'house') moveGhost(g, dt); });
+      break;
+    case 'ready':
+      ghosts.forEach(g => { if (g.mode === 'house') moveGhost(g, dt); });
+      aliens.forEach(a => moveAlien(a, dt));
+      stateT -= dt;
+      if (stateT <= 0) state = 'play';
+      break;
+    case 'play':
+      for (let r = dt; r > 0 && state === 'play'; r -= 1 / 60) step(Math.min(r, 1 / 60));
+      break;
+    case 'dying':
+      dieT += dt;
+      if (dieT > 0.7 && !deathSfx) { deathSfx = true; sfx.die(); }
+      if (dieT > 2.3) { state = 'over'; overT = 0; }
+      break;
+    case 'clear':
+      clearT += dt;
+      if (clearT > 1.9) advanceStage();
+      break;
+    case 'over':
+      overT += dt;
+      break;
+    case 'ending':
+      ending.t += dt;
+      if (ending.kind !== 'bad') {
+        if (Math.random() < dt * 7) meteors.push({ x: Math.random() * (W + 160), y: -20, vx: -(90 + Math.random() * 90), vy: 220 + Math.random() * 160, len: 0.1 + Math.random() * 0.08 });
+        meteors.forEach(m => { m.x += m.vx * dt; m.y += m.vy * dt; });
+        meteors = meteors.filter(m => {
+          if (m.y < 330) return true;
+          flashes.push({ x: m.x, t: 0 });
+          return false;
+        });
+        flashes.forEach(f => { f.t += dt; });
+        flashes = flashes.filter(f => f.t < 0.7);
+      }
+      break;
+  }
+}
+
+// ---------------------------------------------------------------- rendering
+// floor tiles and solid walls for the current stage, drawn once per size
+function buildBg() {
+  const s = canvas.width / W;
+  const c = document.createElement('canvas');
+  c.width = canvas.width; c.height = canvas.height;
+  const g = c.getContext('2d');
+  g.scale(s, s);
+  const th = theme;
+  for (let ty = 0; ty < H / T; ty++) for (let tx = 0; tx < COLS; tx++) {
+    g.fillStyle = (tx + ty) % 2 ? th.fa : th.fb;
+    g.fillRect(tx * T, ty * T, T, T);
+    g.fillStyle = 'rgba(255,255,255,0.40)';
+    g.fillRect(tx * T, ty * T, T, 1); g.fillRect(tx * T, ty * T, 1, T);
+    g.fillStyle = 'rgba(0,0,0,0.10)';
+    g.fillRect(tx * T + T - 1, ty * T, 1, T); g.fillRect(tx * T, ty * T + T - 1, T, 1);
+  }
+  g.fillStyle = '#b9a285';                         // kennel floor
+  g.fillRect(11 * T, TOP + 13 * T, 6 * T, 3 * T);
+  g.fillStyle = 'rgba(0,0,0,0.12)';
+  for (let i = 1; i < 6; i++) g.fillRect((11 + i) * T, TOP + 13 * T, 1, 3 * T);
+  for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) {
+    const px = x * T, py = TOP + y * T;
+    if (MAZE[y][x] === '#') {
+      g.fillStyle = (x + y) % 2 ? th.wa : th.wb;
+      g.fillRect(px, py, T, T);
+      g.fillStyle = th.hi; if (cell(x, y - 1) !== '#') g.fillRect(px, py, T, 2);
+      g.fillStyle = th.hi2; if (cell(x - 1, y) !== '#') g.fillRect(px, py, 2, T);
+      g.fillStyle = th.lo; if (cell(x, y + 1) !== '#') g.fillRect(px, py + T - 2, T, 2);
+      if (cell(x + 1, y) !== '#') g.fillRect(px + T - 2, py, 2, T);
+    } else {
+      g.fillStyle = 'rgba(0,0,0,0.16)';
+      if (cell(x, y - 1) === '#') g.fillRect(px, py, T, 5);
+      if (cell(x - 1, y) === '#') g.fillRect(px, py, 3, T);
+    }
+  }
+  // bedroom hall: rooms with beds sunk into the wall blocks
+  if (st.beds) {
+    for (const r of ROOMS_D) {
+      g.fillStyle = '#c9a56f'; g.fillRect(r.x * T + 3, TOP + r.y * T + 3, r.w * T - 6, r.h * T - 6);
+      g.fillStyle = 'rgba(0,0,0,0.12)';
+      for (let i = 1; i < r.w; i++) g.fillRect(r.x * T + i * T, TOP + r.y * T + 3, 1, r.h * T - 6);
+    }
+    g.fillStyle = '#c9a56f'; g.fillRect(CAGE.x0, CAGE.y0, CAGE.x1 - CAGE.x0, CAGE.y1 - CAGE.y0);
+    for (const b of bedRooms) drawBed(g, b.x, b.y, b.w, b.h, b.blanket, [b.spr]);
+  }
+  return c;
+}
+
+function resize() {
+  // fit the board into the area the controls leave free, keeping the 448:576 shape
+  const area = document.getElementById('boardWrap');
+  const s = Math.min(area.clientWidth / W, area.clientHeight / H);
+  if (s > 0) document.getElementById('wrap').style.width = Math.floor(W * s) + 'px';
+  const r = canvas.getBoundingClientRect();
+  const k = Math.max(1, r.width * (window.devicePixelRatio || 1) / W);
+  canvas.width = Math.round(W * k);
+  canvas.height = Math.round(H * k);
+  bgCache = null;
+}
+
+function text(s, x, y, color, size, align = 'center', stroke = null) {
+  ctx.font = `bold ${size}px "Courier New", monospace`;
+  ctx.textAlign = align; ctx.textBaseline = 'middle';
+  if (stroke) { ctx.lineJoin = 'round'; ctx.lineWidth = 3; ctx.strokeStyle = stroke; ctx.strokeText(s, x, y); }
+  ctx.fillStyle = color;
+  ctx.fillText(s, x, y);
+}
+// draw a pixel sprite centred on (cx, cy); s is canvas units per sprite pixel
+function spr(img, cx, cy, s = PX, g = ctx) {
+  const w = img.width * s, h = img.height * s;
+  const x = Math.round(cx - w / 2), y = Math.round(cy - h / 2);
+  if (img.sh) for (const [ox, oy] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) g.drawImage(img.sh, x + ox, y + oy, w, h);
+  g.drawImage(img, x, y, w, h);
+}
+// draw a sprite, plus a copy across the tunnel seam when it straddles the screen edge
+function wrapDraw(px, fn) {
+  fn(px);
+  if (px < T) fn(px + W);
+  else if (px > W - T) fn(px - W);
+}
+// a sleeper lying head-left on the floor
+function lying(img, cx, cy, g = ctx) {
+  g.save(); g.translate(cx, cy); g.rotate(-Math.PI / 2); spr(img, 0, 0, PX, g); g.restore();
+}
+// a bed (top view) with sleepers; the blanket covers the lower body
+function drawBed(g, cx, cy, w, h, blanket, sleepersImgs) {
+  g.fillStyle = '#6b3f1d'; g.fillRect(cx - w / 2 - 1, cy - h / 2 - 1, w + 2, h + 2);
+  g.fillStyle = '#f1efe6'; g.fillRect(cx - w / 2 + 1, cy - h / 2 + 1, w - 2, h - 2);
+  g.fillStyle = '#ffffff'; g.fillRect(cx - w / 2 + 2, cy - h / 2 + 2, 9, h - 4);
+  sleepersImgs.forEach((im, i) => lying(im, cx - w / 2 + 11, cy + (i - (sleepersImgs.length - 1) / 2) * 20, g));
+  g.fillStyle = blanket; g.fillRect(cx - w / 2 + 14, cy - h / 2 + 1, w - 15, h - 2);
+  g.fillStyle = 'rgba(255,255,255,0.18)'; g.fillRect(cx - w / 2 + 14, cy - h / 2 + 1, w - 15, 2);
+}
+
+const heroDir = () => pac.fy < 0 ? 'up' : pac.fy > 0 ? 'down' : pac.fx > 0 ? 'right' : 'left';
+const px2 = x => x * T, py2 = y => TOP + y * T;
+
+function drawPac() {
+  const set = SPR.hero;
+  if (state === 'clear' && esc) {
+    const u = clamp01(clearT / 0.9), a = 1 - clamp01((clearT - 0.6) / 0.4);
+    ctx.globalAlpha = a;
+    spr(set.down[Math.floor(clearT * 8) % 2], px2(lerp(esc.hx, esc.tx, u)), py2(lerp(esc.hy, esc.ty, u)));
+    ctx.globalAlpha = 1;
+    return;
+  }
+  const cx = px2(pac.x), cy = py2(pac.y);
+  if (state === 'dying') {
+    if (dieT < 0.7) { wrapDraw(cx, px => spr(set[heroDir()][0], px, cy)); return; }
+    // caught for the last time: spin on the spot, shrink and fade out
+    const u = Math.min(1, (dieT - 0.7) / 1.4);
+    const dir = ['down', 'left', 'up', 'right'][Math.floor((dieT - 0.7) * 10) % 4];
+    ctx.globalAlpha = 1 - u * u;
+    wrapDraw(cx, px => spr(set[dir][0], px, cy, PX * (1 - 0.7 * u)));
+    ctx.globalAlpha = 1;
+    return;
+  }
+  if (state === 'title') return;
+  if (hurtT > 0 && state === 'play' && P().flicker && Math.floor(time * 14) % 2 === 0) return;   // blink while invulnerable (normal pace)
+  const f = pac.moving ? Math.floor(pac.phase / 2) % 2 : 0, dir = heroDir();
+  if ((boostT > 0 || dotCharge > 0.5) && pac.moving) {
+    for (const k of [2, 1]) {
+      ctx.globalAlpha = 0.16 * (3 - k);
+      wrapDraw(cx - pac.fx * k * 4.5, px => spr(set[dir][f], px, cy - pac.fy * k * 4.5));
+    }
+    ctx.globalAlpha = 1;
+  }
+  ctx.globalAlpha = hurtT > 0 && state === 'play' && !P().flicker ? 0.55 : 1;   // calm pace: just a soft fade
+  wrapDraw(cx, px => spr(set[dir][f], px, cy));
+  ctx.globalAlpha = 1;
+  if (hasKey) spr(SPR.key, cx, cy - 15 + Math.sin(time * 6) * 1, 1.5);
+}
+
+function drawDog(g, px, cy, dx, dy) {
+  const set = alarmT > 0 ? SPR.dogsAlert : SPR.dogs;
+  const dir = dx > 0 ? 'right' : dx < 0 ? 'left' : dy < 0 ? 'up' : 'down';
+  spr(set[dir][Math.floor(time * 8 + g.i) % 2], px, cy);
+}
+
+const hidden = () => (state === 'dying' && dieT > 0.7) || (state === 'clear' && clearT > 0.6);
+
+function drawGhost(g) {
+  if (hidden()) return;
+  const cx = px2(g.x), cy = py2(g.y);
+  const dx = g.mode === 'leaving' ? 0 : g.dx, dy = g.mode === 'leaving' ? -1 : g.dy;
+  wrapDraw(cx, px => drawDog(g, px, cy, dx, dy));
+}
+
+// each robot's red detection circle is drawn under the actors
+function drawRobotRadius(r) {
+  const cx = px2(r.x), cy = py2(r.y), R = ROBOT_R * T, a = r.alert;
+  ctx.save();
+  ctx.fillStyle = a ? 'rgba(255,30,30,0.24)' : 'rgba(255,30,30,0.10)';
+  ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.fill();
+  const ang = time * 2.2 + r.tx;
+  ctx.fillStyle = a ? 'rgba(255,30,30,0.30)' : 'rgba(255,30,30,0.18)';
+  ctx.beginPath(); ctx.moveTo(cx, cy); ctx.arc(cx, cy, R, ang, ang + 0.55); ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = a ? 'rgba(235,20,20,0.95)' : 'rgba(210,25,25,0.55)';
+  ctx.lineWidth = 1.5; ctx.setLineDash([6, 4]); ctx.lineDashOffset = -time * 14;
+  ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.stroke();
+  ctx.restore();
+}
+function drawRobot(r) {
+  const cx = px2(r.x), cy = py2(r.y) + Math.sin(time * 5 + r.tx) * 1;
+  wrapDraw(cx, px => spr(r.alert ? SPR.robotAlert : SPR.robot, px, cy));
+  if (r.alert) text('!', cx, cy - 16, '#ff2a2a', 16, 'center', '#fff');
+}
+function drawAlien(a) {
+  spr(SPR.alien[Math.floor(time * 6 + a.s) % 2], px2(a.x), py2(a.y) + Math.sin(time * 7 + a.s) * 1);
+}
+
+function drawFlower(cx, cy, s) { spr(SPR.flower, cx, cy, s); }
+
+// stairs: concentric steps going down (dark centre) or up (light centre)
+function drawStairs(s) {
+  const x = s.x * T, y = TOP + s.y * T;
+  const live = s.goal && state === 'play' && goalReady();
+  const down = s.dir === 'down';
+  ctx.fillStyle = '#0d0e12'; ctx.fillRect(x, y, T, T);
+  for (let i = 0; i < 4; i++) {
+    const v = down ? 120 - i * 28 : 40 + i * 28;
+    ctx.fillStyle = `rgb(${v},${v + 6},${v + 18})`;
+    ctx.fillRect(x + 1 + i * 2, y + 1 + i * 2, T - 2 - i * 4, T - 2 - i * 4);
+  }
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath();
+  if (down) { ctx.moveTo(x + 4.5, y + 5); ctx.lineTo(x + 11.5, y + 5); ctx.lineTo(x + 8, y + 11); }
+  else { ctx.moveTo(x + 4.5, y + 11); ctx.lineTo(x + 11.5, y + 11); ctx.lineTo(x + 8, y + 5); }
+  ctx.fill();
+  if (live || (s.goal && state === 'ready')) {
+    ctx.strokeStyle = 'rgba(80,255,140,' + (0.5 + 0.4 * Math.sin(time * 6)) + ')';
+    ctx.lineWidth = 2; ctx.strokeRect(x - 1, y - 1, T + 2, T + 2);
+  } else if (s.goal) {
+    ctx.strokeStyle = 'rgba(255,90,90,0.55)'; ctx.lineWidth = 1.5; ctx.strokeRect(x - 1, y - 1, T + 2, T + 2);
+  }
+}
+
+function drawExit() {
+  if (!st.exit) return;
+  const x = 13 * T, y = TOP + EXIT_Y * T, openNow = goalReady() || state === 'clear';
+  const pulse = 0.5 + 0.5 * Math.sin(time * 5);
+  if (openNow) {
+    ctx.fillStyle = 'rgba(80,255,140,' + (0.18 + 0.15 * pulse) + ')';
+    ctx.fillRect(x - 6, y - 6, 2 * T + 12, T + 6);
+  }
+  ctx.fillStyle = openNow ? '#1d8f48' : '#6e2a2a';
+  ctx.fillRect(x + 2, y + 2, 2 * T - 4, T - 2);
+  ctx.fillStyle = openNow ? '#43e07f' : '#963838';
+  ctx.fillRect(x + 4, y + 4, 2 * T - 8, T - 4);
+  text('EXIT', x + T, y + 8, openNow ? '#06310f' : '#2e0e0e', 9);
+}
+
+// stage 3: the centre of the map is a dark room with an open entrance. He lies in the middle, tied to the four
+// corners by black straps (an X). Walking in with the key turns the light on; touch him to cut him free.
+function drawCenterRoom() {
+  const rx = 11 * T, ry = TOP + 13 * T, rw = 6 * T, rh = 3 * T, cx = 14 * T, cy = py2(14.5);
+  const s = sleepers[0];
+  const strapA = roomOpen ? 1 - clamp01(cageOpenT / 0.4) : 1;       // the straps snap when he is freed
+  if (strapA > 0) {
+    ctx.globalAlpha = strapA;
+    for (const [qx, qy] of [[rx + 3, ry + 3], [rx + rw - 3, ry + 3], [rx + 3, ry + rh - 3], [rx + rw - 3, ry + rh - 3]]) {
+      ctx.strokeStyle = '#050507'; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(qx, qy); ctx.stroke();
+      ctx.strokeStyle = '#3b3b44'; ctx.lineWidth = 0.8; ctx.beginPath(); ctx.moveTo(cx, cy - 0.8); ctx.lineTo(qx, qy - 0.8); ctx.stroke();
+      ctx.fillStyle = '#9aa0ad'; ctx.fillRect(qx - 2, qy - 2, 4, 4);     // ring bolted to the corner
+    }
+    ctx.globalAlpha = 1;
+  }
+  if (s) {
+    if (s.mode === 'asleep') {
+      lying(SPR.manSleep, cx, cy + Math.sin(time * 2) * 0.5);
+      for (let k = 0; k < 3; k++) {
+        const u = (time * 0.45 + k / 3) % 1;
+        ctx.globalAlpha = Math.sin(u * Math.PI);
+        text(k % 2 ? 'Z' : 'z', cx + 8 + u * 7, cy - 8 - u * 16, '#cfe3ff', 8 + u * 8, 'center', '#0b0a10');
+      }
+      ctx.globalAlpha = 1;
+    } else {
+      spr(SPR.man.down[0], cx, cy);
+      text('!', cx, cy - 15 - Math.abs(Math.sin(time * 14)) * 2, '#ff3030', 17, 'center', '#fff');
+    }
+  }
+  // the room is dim and dark until the light goes on
+  const flick = roomLit && lightT < 0.7 ? 0.5 + 0.5 * Math.sin(lightT * 40) : 1;
+  const dark = roomLit ? Math.max(0, 1 - lightT / 1.0) * flick : 1;
+  if (dark > 0) { ctx.fillStyle = 'rgba(4,4,12,' + (0.9 * dark) + ')'; ctx.fillRect(rx, ry, rw, rh); }
+  if (roomLit && lightT < 0.8) { ctx.fillStyle = 'rgba(255,240,170,' + 0.35 * (1 - lightT / 0.8) + ')'; ctx.fillRect(rx, ry, rw, rh); }
+}
+
+// the top-centre room: the two girls' bed in stage 6
+function drawRoom() {
+  if (st.cage) { drawCenterRoom(); return; }
+  if (!st.beds) return;
+  const { x0, x1, y0, y1 } = CAGE;
+  drawBed(ctx, 14 * T, (y0 + y1) / 2, 24, 66, '#ffffff', []);
+  for (const s of sleepers) {
+    const sx = px2(s.x), sy = py2(s.y);
+    if (s.mode === 'asleep') {
+      const breathe = Math.sin(time * 2 + s.x) * 0.5;
+      const img = s.id === 'man' ? SPR.manSleep : s.id === 'pink' ? SPR.pinkSleep : SPR.blackSleep;
+      ctx.save(); ctx.translate(sx, sy + breathe); ctx.rotate(-Math.PI / 2); spr(img, 0, 0); ctx.restore();
+      for (let k = 0; k < 3; k++) {
+        const u = (time * 0.45 + k / 3) % 1;
+        ctx.globalAlpha = Math.sin(u * Math.PI);
+        text(k % 2 ? 'Z' : 'z', sx + 6 + u * 7 + Math.sin(u * 9) * 1.5, sy - 8 - u * 22, '#cfe3ff', 8 + u * 8, 'center', '#0b0a10');
+      }
+      ctx.globalAlpha = 1;
+    } else {
+      spr(SPR[s.id].down[0], sx, sy);
+      text('!', sx, sy - 15 - Math.abs(Math.sin(time * 14)) * 2, '#ff3030', 17, 'center', '#fff');
+    }
+  }
+  if (st.beds) {                       // blanket over the girls' legs
+    ctx.fillStyle = '#ffffff'; ctx.fillRect(x0 + 11, y0 + 4, x1 - x0 - 12, y1 - y0 - 8);
+    ctx.fillStyle = 'rgba(0,0,0,0.08)'; ctx.fillRect(x0 + 11, y0 + 4, x1 - x0 - 12, 2);
+    for (const s of sleepers) if (s.mode !== 'asleep') spr(SPR[s.id].down[0], px2(s.x), py2(s.y));
+  }
+}
+
+// z Z drifting above the strangers in the bedroom hall
+function drawBedZ() {
+  if (!st.beds) return;
+  bedRooms.forEach((b, i) => {
+    const u = (time * 0.35 + i * 0.37) % 1;
+    ctx.globalAlpha = Math.sin(u * Math.PI) * 0.9;
+    text(i % 2 ? 'Z' : 'z', b.x - b.w / 2 + 14 + u * 6, b.y - 6 - u * 10, '#3b2c60', 6 + u * 5, 'center', '#f5ecd8');
+  });
+  ctx.globalAlpha = 1;
+}
+
+// followers walk with the hero
+function drawFollowers() {
+  if (hidden() && state !== 'clear') return;
+  if (state === 'clear' && esc) {
+    esc.f.forEach((f, i) => {
+      const u = clamp01((clearT - 0.35 - i * 0.15) / 0.9), a = 1 - clamp01((clearT - 0.9 - i * 0.15) / 0.4);
+      ctx.globalAlpha = a;
+      spr(SPR[f.id].down[Math.floor(clearT * 8) % 2], px2(lerp(f.x, esc.tx, u)), py2(lerp(f.y, esc.ty, u)));
+      ctx.globalAlpha = 1;
+    });
+    return;
+  }
+  for (const f of team) {
+    const fr = f.moving ? Math.floor(time * 8) % 2 : 0, cx = px2(f.x), cy = py2(f.y);
+    wrapDraw(cx, px => spr(SPR[f.id][f.dir][fr], px, cy));
+  }
+}
+
+function drawItem(it) {
+  const y = py2(it.y) + Math.sin(time * 3 + it.tx) * 1.2, x = px2(it.x);
+  ctx.fillStyle = 'rgba(0,0,0,0.18)'; ctx.beginPath(); ctx.ellipse(x, y + 7, 6, 2, 0, 0, Math.PI * 2); ctx.fill();
+  const glint = 0.35 + 0.35 * Math.sin(time * 5 + it.ty);
+  ctx.strokeStyle = 'rgba(122,61,207,' + glint + ')'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.arc(x, y, 9, 0, Math.PI * 2); ctx.stroke();
+  spr(it.img, x, y, it.scale);
+}
+
+function drawPanel(y0, y1) {
+  ctx.fillStyle = 'rgba(8,8,12,0.86)';
+  ctx.fillRect(0, TOP + y0 * T, W, (y1 - y0) * T);
+}
+
+function hintText() {
+  if (state === 'ready') return '';
+  if (doomT > 0) return 'HE IS GIVING UP...';
+  if (memN > 0) return 'HE IS FALLING BEHIND...';
+  switch (stageNo) {
+    case 1: return 'REACH THE STAIRS!';
+    case 2: return keyS.mode === 'out' ? 'GET THE KEY!' : hasKey ? 'TAKE THE STAIRS DOWN!' : 'KEY IS COMING...';
+    case 3: return sleepers.length ? (!roomLit ? (hasKey ? 'ENTER THE DARK ROOM!' : 'NEED THE KEY!') : 'UNTIE HIM!') : team.length ? 'GO BACK UP!' : '';
+    case 4: return 'BRING HIM UP!';
+    case 5: return '';
+    case 6: return sleepers.length ? 'WAKE THE GIRLS!' : 'REACH THE EXIT!';
+  }
+  return '';
+}
+
+// ---- ending scenes
+const STARS = Array.from({ length: 70 }, () => ({ x: Math.random() * W, y: Math.random() * 300, r: Math.random() * 1.2 + 0.4, p: Math.random() * 6 }));
+// a four-point twinkle
+function star(x, y, r, color) {
+  ctx.fillStyle = color; ctx.beginPath();
+  ctx.moveTo(x, y - r); ctx.lineTo(x + r * 0.3, y - r * 0.3); ctx.lineTo(x + r, y); ctx.lineTo(x + r * 0.3, y + r * 0.3);
+  ctx.lineTo(x, y + r); ctx.lineTo(x - r * 0.3, y + r * 0.3); ctx.lineTo(x - r, y); ctx.lineTo(x - r * 0.3, y - r * 0.3);
+  ctx.closePath(); ctx.fill();
+}
+// paint a happy face (^ ^ eyes, blush and a smile) over a front-facing 3x sprite
+function happyFace(cx, cy) {
+  const left = Math.round(cx - 10.5), top = Math.round(cy - 12);
+  for (const ex of [left + 7.5, left + 13.5]) {
+    const ey = top + 10.5;
+    ctx.fillStyle = '#f6cfa6'; ctx.fillRect(ex - 1.8, ey - 1.8, 3.6, 3.6);
+    ctx.strokeStyle = '#2a1a1a'; ctx.lineWidth = 1.4; ctx.lineJoin = 'round';
+    ctx.beginPath(); ctx.moveTo(ex - 2.3, ey + 1.4); ctx.lineTo(ex, ey - 1.4); ctx.lineTo(ex + 2.3, ey + 1.4); ctx.stroke();
+    ctx.fillStyle = 'rgba(255,110,130,0.7)'; ctx.fillRect(ex + (ex < cx ? -2.6 : 0.6), ey + 2.4, 2, 1.4);
+  }
+  ctx.strokeStyle = '#7a2a2a'; ctx.lineWidth = 1.1;
+  ctx.beginPath(); ctx.arc(cx, top + 12.2, 2.2, 0.15 * Math.PI, 0.85 * Math.PI); ctx.stroke();
+}
+function drawGrassScene(count, trueEnd) {
+  const t = ending.t, hz = 340;
+  const sky = ctx.createLinearGradient(0, 0, 0, hz);
+  // a blood-orange sky: near-black red overhead, burning orange at the horizon
+  sky.addColorStop(0, '#1c0307'); sky.addColorStop(0.45, '#6a1210'); sky.addColorStop(0.8, '#d4441b'); sky.addColorStop(1, '#ffa23c');
+  ctx.fillStyle = sky; ctx.fillRect(0, 0, W, hz);
+  ctx.fillStyle = '#ffd9b0';
+  for (const s of STARS) { ctx.globalAlpha = (0.35 + 0.35 * Math.sin(time * 2 + s.p)) * (1 - s.y / 380); ctx.fillRect(s.x, s.y, s.r, s.r); }
+  ctx.globalAlpha = 1;
+  // meteors falling in the background: red-orange fireballs with long fiery tails
+  for (const m of meteors) {
+    const x2 = m.x - m.vx * m.len * 1.6, y2 = m.y - m.vy * m.len * 1.6;
+    const gr = ctx.createLinearGradient(m.x, m.y, x2, y2);
+    gr.addColorStop(0, 'rgba(255,196,110,1)'); gr.addColorStop(0.35, 'rgba(255,92,24,0.85)'); gr.addColorStop(1, 'rgba(200,20,10,0)');
+    ctx.strokeStyle = gr; ctx.lineWidth = 4; ctx.lineCap = 'round'; ctx.beginPath(); ctx.moveTo(m.x, m.y); ctx.lineTo(x2, y2); ctx.stroke();
+    ctx.lineCap = 'butt';
+    ctx.fillStyle = 'rgba(255,90,30,0.35)'; ctx.beginPath(); ctx.arc(m.x, m.y, 8, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#ffe2a8'; ctx.beginPath(); ctx.arc(m.x, m.y, 3.5, 0, Math.PI * 2); ctx.fill();
+  }
+  // distant hills and the glow where meteors land
+  ctx.fillStyle = '#2b0e0c';
+  ctx.beginPath(); ctx.moveTo(0, hz);
+  for (let x = 0; x <= W; x += 16) ctx.lineTo(x, hz - 18 - 14 * Math.sin(x * 0.02) - 8 * Math.sin(x * 0.07));
+  ctx.lineTo(W, hz + 8); ctx.lineTo(0, hz + 8); ctx.fill();
+  for (const f of flashes) {
+    const k = f.t / 0.7;
+    ctx.globalAlpha = (1 - k) * 0.8;
+    ctx.fillStyle = '#ff7a30';
+    ctx.beginPath(); ctx.ellipse(f.x, hz - 6, 8 + k * 26, 3 + k * 8, 0, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  // grass field
+  const gg = ctx.createLinearGradient(0, hz, 0, H);
+  gg.addColorStop(0, '#3d9a45'); gg.addColorStop(1, '#1f6a31');
+  ctx.fillStyle = gg; ctx.fillRect(0, hz, W, H - hz);
+  ctx.strokeStyle = 'rgba(20,70,30,0.55)'; ctx.lineWidth = 1;
+  for (let i = 0; i < 160; i++) {
+    const gx = (i * 53) % W, gy = hz + 6 + ((i * 97) % (H - hz - 10));
+    ctx.beginPath(); ctx.moveTo(gx, gy); ctx.lineTo(gx - 1, gy - 4); ctx.moveTo(gx + 3, gy); ctx.lineTo(gx + 4, gy - 3); ctx.stroke();
+  }
+  ctx.fillStyle = 'rgba(255,90,30,0.12)'; ctx.fillRect(0, hz, W, H - hz);       // the red sky tints the grass
+  // the wall they escaped from, with the open door
+  ctx.fillStyle = '#4a4d58'; ctx.fillRect(0, 210, 96, 300);
+  ctx.fillStyle = '#5d6170';
+  for (let r = 0; r < 15; r++) for (let c = 0; c < 5; c++) ctx.fillRect(c * 20 + (r % 2) * 10 - 4, 212 + r * 20, 18, 8);
+  ctx.fillStyle = '#121317'; ctx.fillRect(24, 400, 44, 110);
+  ctx.fillStyle = 'rgba(255,240,170,0.5)'; ctx.fillRect(28, 404, 36, 100);
+  // they walk out of the door and along the grass
+  const crew = trueEnd ? ['hero', 'man', 'pink', 'black'] : ['hero', 'man'];
+  // flowers drift down once the first of them is out, like confetti
+  if (t > 3.2) for (let k = 0; k < 12; k++) {
+    const fx = (k * 41 + 18 + Math.sin(t * 1.3 + k) * 16 + W) % W, fy = 40 + (((t - 3.2) * 36 + k * 47) % 470);
+    ctx.globalAlpha = 0.9; spr(SPR.flower, fx, fy, 1 + 0.3 * (k % 3)); ctx.globalAlpha = 1;
+  }
+  const happy = [];
+  crew.forEach((id, i) => {
+    const t0 = i * 0.9, u = clamp01((t - t0) / 3.2), target = 330 - i * 52;
+    if (t < t0) return;
+    const x = lerp(46, target, u), baseY = 470 + (i % 2) * 8, walking = u < 1;
+    const jump = walking ? 0 : Math.abs(Math.sin((t - t0 - 3.2) * 6 + i * 1.3)) * 12;   // hopping for joy
+    const set = id === 'hero' ? SPR.hero : SPR[id];
+    ctx.globalAlpha = clamp01((t - t0) / 0.4);
+    ctx.fillStyle = 'rgba(0,0,0,0.28)'; ctx.beginPath(); ctx.ellipse(x, baseY + 14, 11 - jump * 0.35, 3, 0, 0, Math.PI * 2); ctx.fill();
+    spr(set[walking ? 'right' : 'down'][walking ? Math.floor(t * 8 + i) % 2 : 0], x, baseY - jump, 3);
+    ctx.globalAlpha = 1;
+    if (!walking) { happyFace(x, baseY - jump); happy.push([x, baseY - jump, i]); }
+  });
+  for (const [x, y, i] of happy) {
+    for (let k = 0; k < 3; k++) {            // hearts float up
+      const u = (t * 0.55 + k / 3 + i * 0.21) % 1;
+      ctx.globalAlpha = Math.sin(u * Math.PI);
+      spr(SPR.heart, x + (k - 1) * 12 + Math.sin(u * 8 + k) * 4, y - 26 - u * 55, 1.2 + 0.4 * Math.sin(u * Math.PI));
+    }
+    ctx.globalAlpha = 1;
+    for (let m = 0; m < 3; m++) {            // stars twinkle around them
+      const a = t * 1.5 + m * 2.09 + i;
+      star(x + Math.cos(a) * 28, y - 6 + Math.sin(a) * 20, 3.5 + 1.5 * Math.sin(t * 6 + m + i), '#fff2a0');
+    }
+  }
+  const done = t > 3.2 + (crew.length - 1) * 0.9;
+  if (done) {
+    text(trueEnd ? 'TRUE END' : 'SUCCESS END', W / 2, 90, '#ffe27a', 30, 'center', '#000');
+    text(trueEnd ? 'ALL FOUR MADE IT OUT.' : 'THE TWO OF YOU MADE IT OUT.', W / 2, 122, '#ffffff', 13, 'center', '#000');
+    text(trueEnd ? 'THE SKY WAS FULL OF METEORS.' : 'THE SKY WAS FULL OF METEORS.', W / 2, 142, '#cfe3ff', 11, 'center', '#000');
+    if (t > 6 && Math.floor(time * 2) % 2 === 0) text('PRESS ANY KEY / TAP', W / 2, 520, '#ffffff', 14, 'center', '#000');
+  }
+}
+function drawBadEnding() {
+  const t = ending.t;
+  ctx.fillStyle = '#08080c'; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#17171f'; ctx.fillRect(0, 380, W, 200);
+  // he stops, turns away and walks back; the dogs close in
+  const manX = lerp(200, 300, clamp01(t / 5));
+  spr(SPR.hero.right[Math.floor(t * 4) % 2], 130, 360, 3);
+  spr(SPR.man[t < 1 ? 'right' : 'right'][Math.floor(t * 3) % 2], manX, 360, 3);
+  for (let i = 0; i < 3; i++) {
+    const dx = lerp(560 + i * 50, 380 + i * 36, clamp01(t / 5));
+    spr(SPR.dogsAlert.left[Math.floor(t * 8 + i) % 2], dx, 365 + (i - 1) * 6, 3);
+  }
+  ctx.globalAlpha = clamp01((t - 1) / 1.5);
+  text('BAD END', W / 2, 140, '#ff3b3b', 36, 'center', '#000');
+  text('HE STOPPED. HE TURNED BACK.', W / 2, 190, '#ffffff', 13, 'center', '#000');
+  text('THE DOGS GOT HIM.', W / 2, 212, '#ffffff', 13, 'center', '#000');
+  ctx.globalAlpha = 1;
+  if (t > 6 && Math.floor(time * 2) % 2 === 0) text('PRESS ANY KEY / TAP', W / 2, 500, '#ffffff', 14, 'center', '#000');
+}
+
+function draw() {
+  ctx.setTransform(canvas.width / W, 0, 0, canvas.height / H, 0, 0);
+  ctx.imageSmoothingEnabled = false;
+  if (state === 'ending') {
+    if (ending.kind === 'bad') drawBadEnding(); else drawGrassScene(0, ending.kind === 'true');
+    return;
+  }
+  if (shakeT > 0) ctx.translate((Math.random() - 0.5) * 4, (Math.random() - 0.5) * 4);
+  if (!bgCache) bgCache = buildBg();
+  ctx.drawImage(bgCache, 0, 0, W, H);
+
+  // HUD
+  const blink = Math.floor(time * 2) % 2 === 0;
+  if (state === 'title' || state === 'over' || blink) text('1UP', 4.5 * T, 0.9 * T, INK, 14);
+  text(String(score).padStart(2, '0'), 4.5 * T, 2.0 * T, INK, 14);
+  text('HIGH SCORE', 14 * T, 0.9 * T, INK, 14);
+  text(String(best).padStart(2, '0'), 14 * T, 2.0 * T, INK, 14);
+  text('STAGE', 19.5 * T, 0.9 * T, INK, 14);
+  text(String(stageNo), 19.5 * T, 2.0 * T, INK, 14);
+
+  ctx.fillStyle = '#c99a5b';                       // kennel gate
+  if (!st.cage) ctx.fillRect(13 * T, TOP + 12 * T + 6, 2 * T, 3);       // (the centre room in stage 3 has no door)
+  drawExit();
+  st.stairs.forEach(drawStairs);
+  drawRoom();
+
+  // dots (speed) and corner flowers (+1 heart)
+  for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) {
+    const v = pellets[y * COLS + x];
+    if (!v) continue;
+    const cx = (x + 0.5) * T, cy = TOP + (y + 0.5) * T;
+    if (v === 1) {
+      ctx.fillStyle = '#7a4a10'; ctx.beginPath(); ctx.arc(cx, cy, 2.6, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#f3a21f'; ctx.beginPath(); ctx.arc(cx, cy, 1.8, 0, Math.PI * 2); ctx.fill();
+    } else drawFlower(cx, cy, 1.25 + 0.12 * Math.sin(time * 6));
+  }
+  drawBedZ();
+
+  // bonus flower
+  if (bonus && state !== 'title' && (bonus.t > 2 || Math.floor(time * 6) % 2 === 0)) {
+    const by = TOP + 17.5 * T + Math.sin(time * 4) * 1.2;
+    ctx.strokeStyle = 'rgba(220,40,70,' + (0.45 + 0.3 * Math.sin(time * 8)) + ')';
+    ctx.lineWidth = 1.4;
+    ctx.beginPath(); ctx.arc(14 * T, by, 10.5 + Math.sin(time * 8), 0, Math.PI * 2); ctx.stroke();
+    drawFlower(14 * T, by, 1.8);
+  }
+
+  // the key waiting somewhere in the maze
+  if (keyS.mode === 'out') {
+    const kx = px2(keyS.x), ky = py2(keyS.y) + Math.sin(time * 4) * 1.5;
+    ctx.strokeStyle = 'rgba(240,170,0,' + (0.5 + 0.4 * Math.sin(time * 7)) + ')';
+    ctx.lineWidth = 1.6;
+    ctx.beginPath(); ctx.arc(kx, ky, 9 + Math.sin(time * 7) * 1.5, 0, Math.PI * 2); ctx.stroke();
+    spr(SPR.key, kx, ky, 2);
+  }
+  if (state !== 'title') items.forEach(drawItem);
+
+  // actors
+  if (state !== 'title' && !hidden()) robots.forEach(drawRobotRadius);
+  ghosts.forEach(drawGhost);
+  if (state !== 'title' && !hidden()) { robots.forEach(drawRobot); aliens.forEach(drawAlien); }
+  drawFollowers();
+  drawPac();
+
+  // popups
+  for (const p of popups) {
+    // keep long pop-ups on screen, and fade them out at the end
+    ctx.font = 'bold 11px "Courier New", monospace';
+    const half = ctx.measureText(p.text).width / 2 + 4;
+    ctx.globalAlpha = clamp01((p.life - p.t) / 0.5);
+    text(p.text, Math.max(half, Math.min(W - half, px2(p.x))), py2(p.y) - Math.min(p.t, 1) * 10, p.color, 11, 'center', '#000');
+  }
+  ctx.globalAlpha = 1;
+
+  // bottom HUD: hearts, objective hint + speed meter, level flowers
+  const hy = TOP + 32 * T;
+  for (let i = 0; i < hearts; i++) spr(SPR.heart, 20 + i * 15, hy, 1.6 + (hearts === 1 ? 0.15 * Math.sin(time * 8) : 0));
+  const hint = hintText();
+  if (stageNo === 5 && state !== 'ready') {
+    // reminder of what to avoid; items you already touched are greyed out
+    const x0 = 11.6 * T - 46;
+    text('AVOID', x0, hy - 2, INK, 9, 'left');
+    for (const [id, ox] of [['paper', 40], ['note', 54], ['pencil', 66], ['guitar', 86]]) {
+      ctx.globalAlpha = items.some(it => it.id === id) ? 1 : 0.25;
+      spr(ITEM_KINDS.find(k => k.id === id).img, x0 + ox, hy - 2, 1.2);
+    }
+    ctx.globalAlpha = 1;
+    if (hint) text(hint, 11.6 * T, hy - 13, '#7a1f1f', 9);
+  } else if (hint) text(hint, 11.6 * T, hy - 3, INK, 10);
+  if (boostT > 0 || dotCharge > 0.02) {
+    ctx.fillStyle = 'rgba(0,0,0,0.25)'; ctx.fillRect(11.6 * T - 36, hy + 5, 72, 5);
+    ctx.fillStyle = boostT > 0 ? '#e5112b' : '#f3a21f';
+    ctx.fillRect(11.6 * T - 36, hy + 5, 72 * (boostT > 0 ? boostT / BOOST_SECS : dotCharge), 5);
+  }
+  for (let i = 0; i < 6; i++) {                    // stage progress: filled flower = reached
+    ctx.globalAlpha = i < stageNo ? 1 : 0.25;
+    drawFlower(W - (1.4 + (5 - i) * 1.25) * T, hy, 1.0);
+  }
+  ctx.globalAlpha = 1;
+
+  // overlays
+  if (state === 'ready') {
+    drawPanel(9.2, 11.9 + 0.9 * st.brief.length + 0.9);
+    text('STAGE ' + stageNo, 14 * T, TOP + 10.2 * T, '#ffffff', 22);
+    text(st.name, 14 * T, TOP + 11.6 * T, '#ffd86b', 14);
+    st.brief.forEach((line, i) => text(line, 14 * T, TOP + (12.9 + 0.9 * i) * T, '#cfe3ff', 10));
+    text('READY!', 14 * T, TOP + 17.5 * T, '#ffeb00', 16, 'center', '#000');
+  }
+  if (state === 'clear' && clearT > 0.9) {
+    const k = esc ? esc.kind : 'exit';
+    text(k === 'down' ? 'GOING DOWN...' : k === 'up' ? 'GOING UP...' : 'OUTSIDE!', 14 * T, TOP + 17.5 * T, '#4ee6d9', 16, 'center', '#000');
+  }
+  if (state === 'over') {
+    text('GAME  OVER', 14 * T, TOP + 17.5 * T, '#ff2a2a', 16, 'center', '#000');
+    if (overT > 1.2) {
+      drawPanel(19.4, 23.6);
+      if (blink) text('PRESS ANY KEY / TAP', 14 * T, TOP + 20.6 * T, '#fff', 14);
+      text('RETRY STAGE ' + stageNo, 14 * T, TOP + 22.4 * T, '#4ee6d9', 11);
+    }
+  }
+  if (state === 'title') {
+    drawPanel(9, 24.4);
+    text('RESCUE RUN', 14 * T + 2, TOP + 11.1 * T + 2, '#a00000', 36);
+    text('RESCUE RUN', 14 * T, TOP + 11.1 * T, '#ffffff', 36);
+    text('FREE HIM. ESCAPE TOGETHER.', 14 * T, TOP + 12.7 * T, '#4ee6d9', 12);
+    const wf = Math.floor(time * 8) % 2;
+    spr(SPR.alien[wf], 3.4 * T, TOP + 15.3 * T);
+    spr(SPR.robot, 6 * T, TOP + 15.3 * T);
+    for (let i = 0; i < 3; i++) spr(SPR.dogs.right[Math.floor(time * 8 + i) % 2], (8.2 + i * 2.2) * T, TOP + 15.4 * T);
+    spr(SPR.hero.right[wf], 15.2 * T, TOP + 15.4 * T);
+    spr(SPR.man.down[0], 20.6 * T, TOP + 15.4 * T);
+    text('GO DOWN. FIND THE KEY. FREE HIM.', 14 * T, TOP + 17.3 * T, '#ffd86b', 11);
+    text('CARRY HIM OUT. AVOID THE MEMORIES.', 14 * T, TOP + 18.3 * T, '#ffd86b', 11);
+    text('DOTS = SPEED  FLOWERS = +1 HEART', 14 * T, TOP + 19.3 * T, '#ff7f93', 11);
+    text('PACE: ' + (calm ? 'CALM' : 'NORMAL') + (TOUCH ? '  (TURTLE BUTTON)' : '  (PRESS C)'), 14 * T, TOP + 20.1 * T, calm ? '#4ee6d9' : '#ff7f93', 10);
+    if (blink) text('PRESS ANY KEY / TAP', 14 * T, TOP + 21 * T, '#fff', 14);
+    if (TOUCH) {
+      text('D-PAD OR SWIPE TO MOVE', 14 * T, TOP + 22.5 * T, '#9ab', 11);
+      text('TOP BUTTONS: PAUSE / SOUND', 14 * T, TOP + 23.5 * T, '#9ab', 11);
+    } else {
+      text('ARROWS / WASD / SWIPE', 14 * T, TOP + 22.5 * T, '#9ab', 11);
+      text('P PAUSE   M SOUND', 14 * T, TOP + 23.5 * T, '#9ab', 11);
+    }
+  }
+  // fade between stages
+  const fade = state === 'clear' ? clamp01((clearT - 1.1) / 0.7) : fadeIn / 0.7;
+  if (fade > 0) { ctx.fillStyle = 'rgba(0,0,0,' + fade + ')'; ctx.fillRect(-8, -8, W + 16, H + 16); }
+  if (paused) {
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(0, 0, W, H);
+    text('PAUSED', 14 * T, TOP + 15 * T, '#ffeb00', 28);
+    text('P / TAP ▶ TO RESUME', 14 * T, TOP + 17.5 * T, '#fff', 12);
+  }
+}
+
+// ---------------------------------------------------------------- input
+const KEYS = {
+  ArrowUp: 'up', KeyW: 'up', ArrowLeft: 'left', KeyA: 'left',
+  ArrowDown: 'down', KeyS: 'down', ArrowRight: 'right', KeyD: 'right',
+};
+function anyInput() {
+  if (state === 'title') startGame();
+  else if (state === 'over' && overT > 1.2) retryStage();
+  else if (state === 'ending' && ending.t > 6) { state = 'title'; ending = null; loadStage(1); }
+}
+function steer(d) {
+  audioInit();
+  if (paused) return;
+  anyInput();
+  want = d;
+}
+function togglePause() {
+  if (state === 'title' || state === 'over' || state === 'ending') return;
+  paused = !paused;
+  document.getElementById('bPause').innerHTML = paused ? '&#9654;' : '&#9208;';
+}
+function toggleCalm() {
+  calm = !calm;
+  document.getElementById('bMode').innerHTML = calm ? '&#128034;' : '&#128007;';
+  try { localStorage.setItem('rescue-calm', calm ? '1' : '0'); } catch (e) {}
+  lv = levelParams(stageNo);                       // speeds change right away, chaser counts from the next stage
+  popup(7, 3, calm ? 'CALM MODE' : 'NORMAL MODE', calm ? '#4ee6d9' : '#ff7f93', 1.6);
+}
+function toggleMute() {
+  muted = !muted;
+  document.getElementById('bSnd').innerHTML = muted ? '&#128263;' : '&#128266;';
+  try { localStorage.setItem('rescue-mute', muted ? '1' : '0'); } catch (e) {}
+}
+
+addEventListener('keydown', e => {
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const d = KEYS[e.code];
+  if (d) { e.preventDefault(); steer(DIRS[d]); }
+  else if (e.code === 'KeyP' || e.code === 'Escape') togglePause();
+  else if (e.code === 'KeyM') toggleMute();
+  else if (e.code === 'KeyC') toggleCalm();
+  else if (e.code === 'Space' || e.code === 'Enter') { e.preventDefault(); audioInit(); anyInput(); }
+});
+
+let sx = 0, sy = 0, dragging = false;
+canvas.addEventListener('pointerdown', e => {
+  audioInit();
+  if (paused) { togglePause(); return; }
+  anyInput();
+  sx = e.clientX; sy = e.clientY; dragging = true;
+  canvas.setPointerCapture(e.pointerId);
+});
+canvas.addEventListener('pointermove', e => {
+  if (!dragging) return;
+  const dx = e.clientX - sx, dy = e.clientY - sy;
+  if (Math.hypot(dx, dy) < 18) return;
+  steer(Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? DIRS.right : DIRS.left) : (dy > 0 ? DIRS.down : DIRS.up));
+  sx = e.clientX; sy = e.clientY;
+});
+const endDrag = () => { dragging = false; };
+canvas.addEventListener('pointerup', endDrag);
+canvas.addEventListener('pointercancel', endDrag);
+canvas.addEventListener('contextmenu', e => e.preventDefault());
+
+document.getElementById('bPause').addEventListener('click', e => { e.currentTarget.blur(); togglePause(); });
+document.getElementById('bMode').addEventListener('click', e => { e.currentTarget.blur(); toggleCalm(); });
+document.getElementById('bMode').innerHTML = calm ? '&#128034;' : '&#128007;';
+document.getElementById('bSnd').addEventListener('click', e => { e.currentTarget.blur(); audioInit(); toggleMute(); });
+document.getElementById('bSnd').innerHTML = muted ? '&#128263;' : '&#128266;';
+
+addEventListener('blur', () => { if (!paused && state !== 'title' && state !== 'over' && state !== 'ending') togglePause(); });
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden && !paused && state !== 'title' && state !== 'over' && state !== 'ending') togglePause();
+});
+addEventListener('resize', resize);
+if (window.ResizeObserver) new ResizeObserver(resize).observe(document.getElementById('boardWrap'));
+
+// on-screen D-pad: a tap sets the direction, and the hero keeps going until a wall
+document.querySelectorAll('.d').forEach(b => b.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  audioInit();
+  if (paused) { togglePause(); return; }
+  steer(DIRS[b.dataset.dir]);
+}));
+
+// ---------------------------------------------------------------- main loop
+let last = 0;
+function frame(ts) {
+  requestAnimationFrame(frame);
+  const dt = Math.min(0.05, (ts - last) / 1000 || 0);
+  last = ts;
+  if (!paused) tick(dt);
+  draw();
+}
+
+resize();
+loadStage(1);
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
