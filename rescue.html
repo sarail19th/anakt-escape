@@ -115,7 +115,7 @@ const THEMES = {
 const STAGES = {
   1: { name: 'GROUND FLOOR',  map: 'A', theme: 'ground',  start: [14, 23], dogs: 2, robots: 1, aliens: true,
        stairs: [{ x: 6, y: 3, dir: 'down', goal: true }], need: 'none', crew: [],
-       brief: ['REACH THE STAIRS DOWN.', 'ALIENS GUARD THEM.'] },
+       brief: ['REACH THE STAIRS DOWN.', 'ALIENS GUARD THEM.', 'FOLLOW THE GLOWING BEACON + ARROW.'] },
   2: { name: 'UNDERGROUND 1', map: 'B', theme: 'under1',  start: [25, 5], dogs: 3, robots: 1, key: true,
        stairs: [{ x: 25, y: 5, dir: 'up', goal: false }, { x: 2, y: 29, dir: 'down', goal: true }], need: 'key', crew: [],
        brief: ['FIND THE KEY.', 'THEN TAKE THE STAIRS DOWN.'] },
@@ -128,9 +128,9 @@ const STAGES = {
   5: { name: 'GROUND FLOOR',  map: 'A', theme: 'ground',  start: [6, 3], dogs: 5, robots: 3, team: ['man'], items: true, exit: true,
        stairs: [{ x: 6, y: 3, dir: 'down', goal: false }], need: 'team', crew: ['man'],
        brief: ['MEMORIES CAN SLOW HIM DOWN.', 'AVOID: PICTURE, MUSIC NOTE,', 'COLOR PENCIL, TEAL GUITAR.'] },
-  6: { name: 'BEDROOM HALL',  map: 'D', theme: 'bedroom', start: [3, 29], dogs: 4, robots: 2, team: ['man'], beds: true, exit: true,
+  6: { name: 'BEDROOM HALL',  map: 'D', theme: 'bedroom', start: [3, 29], dogs: 0, robots: 2, guards: [[6, 29], [14, 29], [6, 29], [14, 29]], team: ['man'], beds: true, exit: true,
        stairs: [], need: 'team', crew: ['man', 'pink', 'black'],
-       brief: ['WAKE THE TWO GIRLS.', 'THEN ESCAPE ALL TOGETHER.'] },
+       brief: ['WAKE THE TWO GIRLS.', 'ALIENS GUARD THE ENTRANCE AND EXIT.', 'THEN ESCAPE ALL TOGETHER.'] },
 };
 
 // bedroom hall: wall blocks that are drawn as rooms with beds (tile rectangles)
@@ -489,13 +489,24 @@ function loadStage(n) {
 
   // dogs: the first waits outside the kennel, the others inside
   ghosts = [];
-  const nDogs = Math.max(1, Math.round(st.dogs * P().count)), nRobots = Math.max(1, Math.round(st.robots * P().count));
+  const nDogs = st.dogs ? Math.max(1, Math.round(st.dogs * P().count)) : 0, nRobots = Math.max(1, Math.round(st.robots * P().count));
   for (let i = 0; i < nDogs; i++) {
     const d = DOG_DEF[i], g = { ...d, i, cool: 0, mode: 'house', tx: 14, ty: 11, dx: -1, dy: 0, p: 0.5, x: 14, y: 14.5 };
     if (i === 0) { g.mode = 'normal'; place(g); }
     else if (st.cage) { const w = WAIT_SPOTS[i - 1]; Object.assign(g, { mode: 'wait', tx: w[0], ty: w[1], dx: 0, dy: 0, p: 0 }); place(g); }
     else { g.dx = 0; g.dy = 0; g.p = 0; g.x = 14 + (i - 1 - (nDogs - 2) / 2) * 1.25; }
     ghosts.push(g);
+  }
+  // alien guards (bedroom hall): they hover around their post at the entrance or the exit, and take the dogs' place
+  // as the hunters when a robot raises the alarm
+  if (st.guards) {
+    const nG = Math.max(1, Math.round(st.guards.length * P().count));
+    for (let i = 0; i < nG; i++) {
+      const post = st.guards[i], d = ORDER.find(o => open(post[0] + o.dx, post[1] + o.dy));
+      const g = { name: 'blinky', scatter: post, post, kind: 'alien', i: ghosts.length, cool: 0, mode: 'normal',
+        tx: post[0], ty: post[1], dx: d.dx, dy: d.dy, p: 0 };
+      place(g); ghosts.push(g);
+    }
   }
   // robots on random tiles away from the hero
   robots = [];
@@ -657,7 +668,25 @@ function ghostChoose(g) {
   g.dx = best.dx; g.dy = best.dy;
 }
 
+// an alien guard is hunting while the alarm rings (unless it was just tackled and is backing off)
+const hunting = g => alarmT > 0 && g.cool <= 0;
+
+// guards wander close to their post and head back if they drift too far
+const ALIEN_LEASH = 3.5;
+function patrolChoose(g) {
+  const far = Math.hypot(g.tx - g.post[0], g.ty - g.post[1]) > ALIEN_LEASH;
+  let cand = ORDER.filter(d => open(g.tx + d.dx, g.ty + d.dy) && (far || !(g.dx === -d.dx && g.dy === -d.dy)));
+  if (!cand.length) cand = [{ dx: -g.dx, dy: -g.dy }];
+  let d = pick(cand);
+  if (far) {
+    const dd = o => Math.hypot(g.tx + o.dx - g.post[0], g.ty + o.dy - g.post[1]);
+    d = cand.reduce((a, b) => dd(b) < dd(a) ? b : a);
+  }
+  g.dx = d.dx; g.dy = d.dy;
+}
+
 function ghostSpeed(g) {
+  if (g.kind === 'alien' && !hunting(g)) return ALIEN_SPEED * P().alien;
   if (g.ty === 14 && (g.tx < 6 || g.tx > 21)) return lv.tun;
   return lv.ghost * (alarmT > 0 ? P().alarmBoost : 1);
 }
@@ -679,7 +708,7 @@ function moveGhost(g, dt) {
       }
       break;
     default:
-      advance(g, ghostSpeed(g) * dt, ghostChoose);
+      advance(g, ghostSpeed(g) * dt, g.kind === 'alien' && !hunting(g) && g.cool <= 0 ? patrolChoose : ghostChoose);
       place(g);
   }
 }
@@ -910,7 +939,12 @@ function step(dt) {
     } else if (noticeT <= 0) { noticeT = 2; popup(pac.x, pac.y - 0.8, 'TOO DARK... NEED THE KEY', '#ff5a5a', 1.6); }
   }
   if (st.cage && roomLit && sleepers.some(s => s.mode === 'asleep') && Math.hypot(pac.x - 14, pac.y - 14.5) < 1.1) wakeSleepers();   // cut the straps
-  if (st.beds && sleepers.some(s => s.mode === 'asleep') && pac.ty === 5 && (pac.tx === 13 || pac.tx === 14)) wakeSleepers();
+  // the girls' bed fills the top-centre block: touching it from any side or corner wakes them (tiles around the block)
+  if (st.beds && sleepers.some(s => s.mode === 'asleep') && pac.tx >= 12 && pac.tx <= 15 && pac.ty <= 5) {
+    roomLit = true; lightT = 0;                    // the girls' room lights up as you arrive
+    popup(14, 6.1, 'LIGHTS ON!', '#ffe27a', 1.8);
+    wakeSleepers();
+  }
   updateTeam(dt);
 
   // stairs and exit
@@ -1155,6 +1189,11 @@ const hidden = () => (state === 'dying' && dieT > 0.7) || (state === 'clear' && 
 function drawGhost(g) {
   if (hidden()) return;
   const cx = px2(g.x), cy = py2(g.y);
+  if (g.kind === 'alien') {            // alien guard: shows a red "!" while it hunts you
+    wrapDraw(cx, px => spr(SPR.alien[Math.floor(time * 6 + g.i) % 2], px, cy + Math.sin(time * 7 + g.i)));
+    if (hunting(g)) text('!', cx, cy - 15, '#ff2a2a', 14, 'center', '#fff');
+    return;
+  }
   const dx = g.mode === 'leaving' ? 0 : g.dx, dy = g.mode === 'leaving' ? -1 : g.dy;
   wrapDraw(cx, px => drawDog(g, px, cy, dx, dy));
 }
@@ -1325,6 +1364,94 @@ function drawItem(it) {
   ctx.strokeStyle = 'rgba(122,61,207,' + glint + ')'; ctx.lineWidth = 1;
   ctx.beginPath(); ctx.arc(x, y, 9, 0, Math.PI * 2); ctx.stroke();
   spr(it.img, x, y, it.scale);
+}
+
+// bedroom hall: the whole hall is dimly lit (much lighter than the dark room of stage 3). The girls' room is
+// darker still until you arrive, then its light fades on.
+function drawDim() {
+  if (!st.beds || state === 'title') return;
+  const { x0, x1, y0, y1 } = CAGE;
+  ctx.save();
+  ctx.beginPath(); ctx.rect(0, TOP, W, ROWS * T); ctx.rect(x0, y0, x1 - x0, y1 - y0);
+  ctx.clip('evenodd');                             // everything except the girls' room
+  ctx.fillStyle = 'rgba(14,8,28,0.38)'; ctx.fillRect(0, TOP, W, ROWS * T);
+  ctx.restore();
+  const flick = roomLit && lightT < 0.7 ? 0.5 + 0.5 * Math.sin(lightT * 40) : 1;
+  const dark = roomLit ? Math.max(0, 1 - lightT / 1.0) * flick : 1;
+  if (dark > 0) { ctx.fillStyle = 'rgba(10,6,22,' + 0.64 * dark + ')'; ctx.fillRect(x0, y0, x1 - x0, y1 - y0); }
+  if (roomLit) {                                    // warm light glowing in the room
+    ctx.fillStyle = 'rgba(255,228,150,' + (lightT < 0.9 ? 0.35 * (1 - lightT / 0.9) + 0.08 : 0.08) + ')';
+    ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
+  }
+}
+
+// ---- guidance: where am I, and where do I need to go?
+const rgba = (hex, a) => { const n = parseInt(hex.slice(1), 16); return 'rgba(' + (n >> 16) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + a + ')'; };
+
+// the current goal(s), in tile units
+function objectives() {
+  const stair = () => { const s = st.stairs.find(q => q.goal); return s && { x: s.x + 0.5, y: s.y + 0.5, label: s.dir === 'down' ? 'STAIRS ▼' : 'STAIRS ▲', color: '#43e07f' }; };
+  const exit = { x: 14, y: 29.5, label: 'EXIT', color: '#43e07f' };
+  let o = null;
+  switch (stageNo) {
+    case 1: case 4: o = stair(); break;
+    case 2: o = keyS.mode === 'out' ? { x: keyS.x, y: keyS.y, label: 'KEY', color: '#ffd23a' } : hasKey ? stair() : null; break;
+    case 3: o = sleepers.length ? { x: 14, y: 14.5, label: roomLit ? 'HIM' : 'DARK ROOM', color: '#4ee6d9' } : stair(); break;
+    case 5: o = exit; break;
+    case 6: o = sleepers.length ? { x: 14, y: 2.6, label: 'GIRLS', color: '#ff7fb0' } : exit; break;
+  }
+  return o ? [o] : [];
+}
+
+// a soft glow under the hero so they stand out from the maze
+function drawHeroGlow() {
+  const x = px2(pac.x), y = py2(pac.y);
+  const g = ctx.createRadialGradient(x, y, 2, x, y, 17);
+  g.addColorStop(0, 'rgba(255,240,150,0.5)'); g.addColorStop(1, 'rgba(255,240,150,0)');
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, 17, 0, Math.PI * 2); ctx.fill();
+}
+
+// "YOU" marker at the start of every stage: pulsing ring, bouncing arrow and label
+function drawHeroMarker() {
+  if (!(state === 'ready' || (state === 'play' && pacDist < 3 && stageT < 7))) return;
+  const x = px2(pac.x), y = py2(pac.y), p = (time * 1.2) % 1;
+  ctx.strokeStyle = '#ffe66b'; ctx.lineWidth = 2;
+  ctx.globalAlpha = 0.9 * (1 - p); ctx.beginPath(); ctx.arc(x, y, 9 + p * 18, 0, Math.PI * 2); ctx.stroke();
+  ctx.globalAlpha = 0.85; ctx.beginPath(); ctx.arc(x, y, 12, 0, Math.PI * 2); ctx.stroke();
+  ctx.globalAlpha = 1;
+  const by = y - 24 - Math.abs(Math.sin(time * 5)) * 4;
+  ctx.fillStyle = '#ffe66b'; ctx.strokeStyle = '#000'; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(x - 6, by - 6); ctx.lineTo(x + 6, by - 6); ctx.lineTo(x, by + 4); ctx.closePath(); ctx.stroke(); ctx.fill();
+  text('YOU', Math.max(14, Math.min(W - 14, x)), by - 14, '#ffe66b', 11, 'center', '#000');
+}
+
+// beacons on the goal: pulsing rings, a light shaft and a label, plus a little arrow beside the hero pointing there
+function drawBeacons() {
+  if (state !== 'play' && state !== 'ready') return;
+  for (const o of objectives()) {
+    const x = px2(o.x), y = py2(o.y), p = (time * 0.9) % 1;
+    const gr = ctx.createLinearGradient(0, y, 0, y - 64);
+    gr.addColorStop(0, rgba(o.color, 0.6)); gr.addColorStop(1, rgba(o.color, 0));
+    ctx.fillStyle = gr; ctx.fillRect(x - 6, y - 64, 12, 64);
+    ctx.strokeStyle = o.color; ctx.lineWidth = 2;
+    for (const q of [p, (p + 0.5) % 1]) { ctx.globalAlpha = (1 - q) * 0.9; ctx.beginPath(); ctx.arc(x, y, 6 + q * 20, 0, Math.PI * 2); ctx.stroke(); }
+    ctx.globalAlpha = 1;
+    // label above the shaft (below the goal if it is at the top of the screen)
+    const above = y - 74 > TOP + 6, ly = above ? y - 74 + Math.sin(time * 4) * 2 : y + 26;
+    ctx.font = 'bold 11px "Courier New", monospace';
+    const half = ctx.measureText(o.label).width / 2 + 3, lx = Math.max(half, Math.min(W - half, x));
+    text(o.label, lx, ly, o.color, 11, 'center', '#000');
+    // compass arrow next to the hero, only when the goal is some way off
+    const dx = o.x - pac.x, dy = o.y - pac.y, d = Math.hypot(dx, dy);
+    if (state === 'play' && d > 4) {
+      const a = Math.atan2(dy, dx), hx = px2(pac.x), hy = py2(pac.y);
+      ctx.save(); ctx.translate(hx + Math.cos(a) * 27, hy + Math.sin(a) * 27); ctx.rotate(a);
+      ctx.globalAlpha = 0.8 + 0.2 * Math.sin(time * 6);
+      ctx.fillStyle = o.color; ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 2; ctx.lineJoin = 'round';
+      ctx.beginPath(); ctx.moveTo(11, 0); ctx.lineTo(-5, -8); ctx.lineTo(-1, 0); ctx.lineTo(-5, 8); ctx.closePath(); ctx.stroke(); ctx.fill();
+      ctx.restore(); ctx.globalAlpha = 1;
+    }
+  }
 }
 
 function drawPanel(y0, y1) {
@@ -1538,7 +1665,11 @@ function draw() {
   ghosts.forEach(drawGhost);
   if (state !== 'title' && !hidden()) { robots.forEach(drawRobot); aliens.forEach(drawAlien); }
   drawFollowers();
+  if (state === 'play' || state === 'ready') drawHeroGlow();
   drawPac();
+  drawDim();
+  drawBeacons();
+  drawHeroMarker();
 
   // popups
   for (const p of popups) {
