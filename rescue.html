@@ -55,7 +55,11 @@
     body.touch { --b: clamp(40px, 21dvh, 64px); }
     body.touch #dpad { order: -1; margin: 0 14px; align-self: center; }
     body.touch #side { order: 1; margin: 0 14px; align-self: center; }
+    body.touch .srcfoot { position: fixed; left: 8px; bottom: 2px; padding: 0; }
   }
+  /* small source link under the game; it must never take real room from the board */
+  .srcfoot { flex: none; margin: 0; padding: 2px 10px calc(4px + env(safe-area-inset-bottom)); font: 11px/1.4 sans-serif; text-align: center; }
+  .srcfoot a { color: #9aa3b5; text-decoration: underline; }
 </style>
 </head>
 <body>
@@ -79,6 +83,7 @@
     </div>
     <div id="side"></div>
   </div>
+  <p class="srcfoot"><a href="https://github.com/sarail19th/anakt-escape" target="_blank" rel="noopener noreferrer">Source on GitHub</a></p>
 </div>
 
 <script>
